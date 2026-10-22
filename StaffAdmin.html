@@ -1,0 +1,277 @@
+<script>
+  /* Staff app, Admin only: importing lists, and Settings. */
+
+  /* ================= Import ================= */
+  function importPanel(opt) {
+    var text = '', items = [], approved = {};
+    var area = el('textarea', { placeholder: 'Or paste rows copied from Excel or Google Sheets here, with the heading row', 'aria-label': 'Paste rows', style: 'min-height:100px' });
+    var file = el('input', { type: 'file', accept: '.csv,.tsv,.txt,text/csv', 'aria-label': 'File' });
+    var out = el('div');
+    function read() {
+      return new Promise(function (resolve, reject) {
+        var f = file.files[0];
+        if (!f) return resolve(area.value);
+        var fr = new FileReader();
+        fr.onload = function () { resolve(String(fr.result)); };
+        fr.onerror = function () { reject(new Error('The file could not be read. Save it as CSV and try again.')); };
+        fr.readAsText(f);
+      });
+    }
+    function check() {
+      read().then(function (t) {
+        if (!t.trim()) return toast('Choose a file or paste the rows first.', 'bad');
+        text = t;
+        return call(opt.previewFn, text).then(function (r) { items = r; approved = {}; draw(); });
+      }).catch(fail);
+    }
+    function count(st) { return items.filter(function (i) { return i.status === st; }).length; }
+    function draw() {
+      var nNew = count('new'), nUpd = count('update'), nBad = count('problem'), nSame = count('same');
+      var nApproved = Object.keys(approved).length, nSkipped = nBad + nUpd - nApproved;
+      var word = { 'new': ['New', 's-ok'], update: ['Change', 's-warn'], problem: ['Problem', 's-bad'] };
+      clear(out);
+      add(out, [
+        el('p', { style: 'margin-top:14px' }, [el('b', { text: nNew + ' new' }), ', ' + plural(nUpd, 'change') + ' to existing records, ' + plural(nBad, 'row') + ' with a problem, ' + nSame + ' already up to date.']),
+        nUpd ? el('div', { class: 'row', style: 'margin-bottom:8px' }, [
+          el('span', { class: 'muted', text: 'A change is only saved if you tick it.' }),
+          button('Tick all changes', function () { items.forEach(function (i) { if (i.status === 'update') approved[i.data[opt.key]] = true; }); draw(); }, 'small'),
+          button('Untick all', function () { approved = {}; draw(); }, 'small')]) : null,
+        nNew + nUpd + nBad ? table(['Row', '', opt.keyLabel, opt.nameLabel, 'Details'], items.filter(function (i) { return i.status !== 'same'; }).slice(0, 1000).map(function (i) {
+          var details;
+          if (i.status === 'problem') details = el('span', { class: 's-bad', text: i.problems.join('; ') });
+          else if (i.status === 'update') {
+            details = el('div', {}, [
+              i.changes.map(function (c) { return el('div', { text: c.field + ': "' + c.old + '" becomes "' + c['new'] + '"' }); }),
+              el('label', { class: 'check', style: 'padding:4px 0 0' }, [el('input', { type: 'checkbox', checked: !!approved[i.data[opt.key]], onchange: function (ev) {
+                if (ev.target.checked) approved[i.data[opt.key]] = true; else delete approved[i.data[opt.key]];
+                draw();
+              } }), 'Save this change'])
+            ]);
+          } else details = el('span', { class: 'muted', text: 'Will be added' });
+          return tr([i.line, el('span', { class: word[i.status][1], text: word[i.status][0] }), i.data[opt.key], opt.name(i.data), details]);
+        })) : null,
+        el('div', { class: 'row', style: 'margin-top:14px' }, [
+          el('button', { class: 'btn accent', type: 'button', disabled: !(nNew + nApproved), text: 'Save ' + nNew + ' new and ' + plural(nApproved, 'change'), onclick: function () {
+            call(opt.commitFn, text, Object.keys(approved)).then(function (r) {
+              clear(out).appendChild(el('div', { class: 'note ok', style: 'margin-top:14px', text: r.added + ' added, ' + r.updated + ' changed, ' + r.skipped + ' left out. ' + opt.after }));
+              file.value = ''; area.value = '';
+            }).catch(fail);
+          } }),
+          nSkipped ? button('Download the ' + plural(nSkipped, 'row') + ' left out', function () {
+            var rows = items.filter(function (i) { return i.status === 'problem' || (i.status === 'update' && !approved[i.data[opt.key]]); });
+            download(opt.skipName, 'text/csv', opt.skipCsv(rows));
+          }) : null])
+      ]);
+    }
+    return section(opt.title, [
+      el('p', { class: 'muted', text: opt.intro }),
+      opt.template ? el('p', {}, button('Download the blank template', opt.template, 'small')) : null,
+      field('File (CSV)', file), area,
+      el('div', { class: 'row', style: 'margin-top:10px' }, [button('Check the list', check, 'primary'),
+        el('span', { class: 'muted', text: 'Nothing is saved until you have seen the result.' })]),
+      out
+    ]);
+  }
+
+  function csvLine(cells) {
+    return cells.map(function (v) {
+      var s = String(v === null || v === undefined ? '' : v);
+      if (/^[=+\-@]/.test(s)) s = "'" + s;
+      return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }).join(',');
+  }
+
+  VIEWS['import'] = function (root) {
+    var map = { student_first_name: 'first_name', student_last_name: 'last_name', preferred_language: 'language', date_of_birth: 'dob' };
+    add(root, [
+      el('p', {}, button('Back to Home', function () { go('home'); }, 'small')),
+      el('h1', { text: 'Import a list' }),
+      importPanel({
+        title: 'Students and parents', key: 'student_id', keyLabel: 'Student ID', nameLabel: 'Student',
+        intro: 'Students are matched by student ID. An import never deletes a student, never changes a signed agreement, and never sends email.',
+        previewFn: 'apiImportPreview', commitFn: 'apiImportCommit', skipName: 'students_left_out.csv',
+        after: 'Next: go to Home and send the links.',
+        name: function (d) { return d.last_name + ', ' + d.first_name + ' (grade ' + d.grade + ')'; },
+        template: function () { call('apiImportTemplate').then(function (csv) { download('students_template.csv', 'text/csv', csv); }).catch(fail); },
+        skipCsv: function (rows) {
+          var cols = B.importFields;
+          return [csvLine(cols.concat(['why_left_out']))].concat(rows.map(function (i) {
+            return csvLine(cols.map(function (c) { var v = i.data[map[c] || c]; return v === 'INVALID' ? '' : v; })
+              .concat([i.status === 'problem' ? i.problems.join('; ') : 'Change not ticked']));
+          })).join('\r\n');
+        }
+      }),
+      importPanel({
+        title: 'Chromebooks', key: 'asset_tag', keyLabel: 'Asset tag', nameLabel: 'Serial number and model',
+        intro: 'Use the Digital Promise file. It needs an Asset Tag column and a Serial Number column. Model, IMEI, MAC, MDN and ICCID are read if they are there. New Chromebooks start as In stock. An import never changes who has a Chromebook.',
+        previewFn: 'apiDeviceImportPreview', commitFn: 'apiDeviceImportCommit', skipName: 'chromebooks_left_out.csv',
+        after: 'They are listed under Chromebooks and repairs.',
+        name: function (d) { return d.serial_number + ', ' + d.model; },
+        skipCsv: function (rows) {
+          var cols = ['asset_tag', 'serial_number', 'model', 'imei', 'mac', 'mdn', 'iccid', 'notes'];
+          return [csvLine(cols.concat(['why_left_out']))].concat(rows.map(function (i) {
+            return csvLine(cols.map(function (c) { return i.data[c]; }).concat([i.status === 'problem' ? i.problems.join('; ') : 'Change not ticked']));
+          })).join('\r\n');
+        }
+      })
+    ]);
+  };
+
+  /* ================= Settings ================= */
+  var SETTINGS_TABS = [['people', 'People'], ['school', 'School'], ['prices', 'Prices'], ['emails', 'Emails'], ['forms', 'Other forms'], ['tech', 'Technical']];
+  var SCHOOL_FIELDS = [
+    ['SCHOOL_NAME', 'School name'], ['SCHOOL_ADDRESS', 'Address'], ['SCHOOL_PHONES', 'Phone numbers'], ['CAMPUS', 'Campus'],
+    ['SCHOOL_YEAR', 'School year', 'Used in the name of the folder the PDFs are saved in.'], ['DEPLOYMENT_DATE', 'Deployment date'],
+    ['IT_EMAIL', 'IT help email', 'Shown to parents. Problem, repair and lost reports are sent here.'], ['DEVICE_MODEL', 'Chromebook model'],
+    ['POLICY_URL', 'Web link to the Chromebook Policy'], ['LOGO_FILE_ID', 'School logo', 'The Google Drive file ID of the logo image. Leave empty for no logo on the PDF.']
+  ];
+  var FORM_FIELDS = [
+    ['OUTSIDE_FORMS_METHOD', 'How do the Digital Promise and Verizon forms reach the school?', '', [['staff', 'On paper or through their own website. Staff mark them as received.'], ['upload', 'The parent uploads a photo or PDF while signing.']]],
+    ['OUTSIDE_FORMS_REQUIRE_STAFF_VERIFY', 'A form only counts after staff have checked it', '', 'yn'],
+    ['VERIZON_REQUIRED', 'The Verizon release must also be in before a Chromebook is issued', 'The Digital Promise agreement is always required.', 'yn'],
+    ['HELPERS_CAN_VERIFY_FORMS', 'Station Helpers may accept a paper form on deployment day', '', 'yn'],
+    ['IT_STAFF_SEE_CONTACT', 'IT Staff can see parent phone numbers and emails', 'Admins always can. Station Helpers never can.', 'yn'],
+    ['DP_FORM_URL', 'Web link to the Digital Promise form (optional)'], ['VZ_FORM_URL', 'Web link to the Verizon form (optional)']
+  ];
+  var EMAILS = [['INVITE', 'First email with the link'], ['REMINDER', 'Reminder'], ['RECEIPT', 'Receipt after signing']];
+
+  VIEWS.settings = function (root, tab) {
+    tab = tab || 'people';
+    add(root, [el('h1', { text: 'Settings' }),
+      el('nav', { class: 'sub', 'aria-label': 'Settings sections' }, SETTINGS_TABS.map(function (t) {
+        return el('button', { type: 'button', class: t[0] === tab ? 'on' : '', text: t[1], onclick: function () { go('settings', t[0]); } });
+      }))]);
+    var body = root.appendChild(el('div'));
+    if (tab === 'people') return peopleTab(body);
+    call('apiGetSettings').then(function (list) {
+      var byKey = {};
+      list.forEach(function (s) { byKey[s.key] = s; });
+      var inputs = {};
+      /** One labelled input bound to a setting. kind: undefined (text) | 'area' | 'yn' | [[value, label]...] */
+      function input(key, label, hint, kind) {
+        var value = byKey[key] ? byKey[key].value : '';
+        var node;
+        if (kind === 'yn') {
+          node = el('input', { type: 'checkbox', checked: value === 'Y' });
+          inputs[key] = function () { return node.checked ? 'Y' : 'N'; };
+          return el('div', {}, [el('label', { class: 'check' }, [node, label]), hint ? el('p', { class: 'muted', style: 'margin:-6px 0 8px 34px', text: hint }) : null]);
+        }
+        if (Array.isArray(kind)) node = el('select', {}, kind.map(function (o) { return el('option', { value: o[0], text: o[1], selected: o[0] === value }); }));
+        else if (kind === 'area') node = el('textarea', { value: value, style: 'min-height:200px' });
+        else node = el('input', { type: 'text', value: value });
+        inputs[key] = function () { return node.value; };
+        return el('div', {}, [field(label, node), hint ? el('p', { class: 'muted', style: 'margin:-8px 0 12px', text: hint }) : null]);
+      }
+      function saveButton() {
+        return el('div', { class: 'row', style: 'margin-top:14px' }, button('Save', function () {
+          var changed = {};
+          Object.keys(inputs).forEach(function (k) {
+            var v = inputs[k]().replace(/\r\n?/g, '\n').trim();
+            if (v !== (byKey[k] ? byKey[k].value : '')) changed[k] = v;
+          });
+          if (!Object.keys(changed).length) return toast('Nothing was changed.');
+          call('apiSaveSettings', changed).then(function () { toast('Saved', 'ok'); go('settings', tab); }).catch(fail);
+        }, 'primary'));
+      }
+      function keysStarting(prefix) { return list.filter(function (s) { return s.key.indexOf(prefix) === 0; }); }
+
+      if (tab === 'school') add(body, [SCHOOL_FIELDS.map(function (f) { return input(f[0], f[1], f[2]); }), saveButton()]);
+
+      if (tab === 'prices') add(body, [
+        el('h2', { text: 'Repair and replacement costs' }),
+        el('p', { class: 'muted', text: 'These prices appear in the agreement parents sign and in the PDF. Changing a price does not change agreements that are already signed.' }),
+        el('div', { class: 'grid' }, keysStarting('COST: ').map(function (s) { return input(s.key, s.key.substring(6) + ', in dollars'); })),
+        el('h2', { text: 'Who pays for a repair', style: 'margin-top:18px' }),
+        el('p', { class: 'muted', text: 'Written as school percent / student percent, for example 50/50.' }),
+        el('div', { class: 'grid' }, keysStarting('SHARE: ').map(function (s) { return input(s.key, s.key.substring(7)); })),
+        saveButton(),
+        el('p', { class: 'muted', style: 'margin-top:14px', text: 'To add or remove a row, edit the Config tab of the database Sheet. Rows that start with "COST: " or "SHARE: " are picked up in order.' })
+      ]);
+
+      if (tab === 'emails') add(body, [
+        el('p', { class: 'muted', text: 'Words in double curly brackets are filled in for each family: {{student_name}}, {{student_first_name}}, {{grade}}, {{link}}, {{school}}, {{it_email}}. The receipt can also use {{parent_name}} and {{signed_date}}.' }),
+        EMAILS.map(function (e) {
+          return [['EN', 'English'], ['ES', 'Spanish']].map(function (l) {
+            return el('details', {}, [el('summary', { text: e[1] + ', ' + l[1] }), el('div', {}, [
+              input('EMAIL_' + e[0] + '_SUBJECT_' + l[0], 'Subject'), input('EMAIL_' + e[0] + '_BODY_' + l[0], 'Message', '', 'area')])]);
+          });
+        }),
+        saveButton()
+      ]);
+
+      if (tab === 'forms') add(body, [FORM_FIELDS.map(function (f) { return input(f[0], f[1], f[2], f[3]); }), saveButton()]);
+
+      if (tab === 'tech') {
+        var used = {};
+        SCHOOL_FIELDS.concat(FORM_FIELDS).forEach(function (f) { used[f[0]] = true; });
+        var rest = list.filter(function (s) { return !used[s.key] && !/^(COST: |SHARE: |EMAIL_)/.test(s.key); });
+        add(body, [
+          el('p', { class: 'muted', text: 'Set once during installation. See the installation guide before changing these.' }),
+          el('div', { class: 'box' }, [el('h3', { text: 'Test the PDF forms' }),
+            el('p', { class: 'muted', text: 'Fills the three blank forms with made-up data and saves them in a folder called _pdf_test. Do this once after installing, and again whenever a blank form is replaced.' }),
+            button('Test the PDF forms', function () {
+              call('pdfSmokeTest').then(function (msg) {
+                modal('PDF test result', el('pre', { style: 'white-space:pre-wrap;font:inherit', text: msg ||
+                  'No answer came back from the server. The PDF library may not be running in this Google account. Tell whoever maintains the code.' }));
+              }).catch(fail);
+            })]),
+          el('div', { class: 'box' }, [el('h3', { text: 'Measure the speed' }),
+            el('p', { class: 'muted', text: 'Times a few requests from this computer to the app. Use it when the app feels slow, and pass the numbers to whoever maintains the code.' }),
+            button('Measure the speed', function () {
+              var tests = [['One empty request (the fixed cost of every click)', 'apiPing'], ['Home', 'apiHome'], ['Student list', 'apiListStudents'], ['Find a student by name', 'apiStationSearch', 'an']];
+              var lines = [], box = el('pre', { style: 'white-space:pre-wrap;font:inherit', text: 'Measuring' });
+              modal('Speed', box);
+              (function next(i) {
+                if (i === tests.length) { box.textContent = lines.join('\n'); return; }
+                var started = Date.now();
+                call.apply(null, tests[i].slice(1)).then(function () {
+                  lines.push(tests[i][0] + ': ' + ((Date.now() - started) / 1000).toFixed(1) + ' seconds');
+                  box.textContent = lines.join('\n') + '\nMeasuring';
+                  next(i + 1);
+                }).catch(function (e) { lines.push(tests[i][0] + ': failed, ' + errText(e)); next(i + 1); });
+              })(0);
+            })]),
+          rest.map(function (s) { return input(s.key, s.key, s.description); }), saveButton()
+        ]);
+      }
+    }).catch(fail);
+  };
+
+  function peopleTab(root) {
+    call('apiListStaff').then(function (staff) {
+      function edit(s) {
+        var isNew = !s;
+        s = s || { role: 'Station Helper', active: true };
+        var email = el('input', { type: 'email', value: s.email || '', readOnly: !isNew });
+        var name = el('input', { type: 'text', value: s.name || '', maxlength: '100' });
+        var role = el('select', {}, ['Admin', 'IT Staff', 'Station Helper'].map(function (r) { return el('option', { value: r, text: r, selected: r === s.role }); }));
+        var active = el('input', { type: 'checkbox', checked: s.active });
+        modal(isNew ? 'Add a person' : s.name || s.email, el('div', {}, [field('School email', email), field('Name', name), field('Role', role),
+          el('label', { class: 'check' }, [active, 'This person can open the app']),
+          el('p', { class: 'muted', text: 'Admin: everything. IT Staff: students, deployment, repairs and reports, without parent contact details. Station Helper: the deployment screen only, with student name, grade, form status and asset tag.' })]),
+          [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: function (close) {
+            call('apiSaveStaff', { email: email.value.trim(), name: name.value.trim(), role: role.value, active: active.checked })
+              .then(function () { close(); toast('Saved', 'ok'); go('settings', 'people'); }).catch(fail);
+          } }]);
+      }
+      function helpers(on) {
+        confirmBox(on ? 'Let all Station Helpers in?' : 'Lock all Station Helpers out?',
+          on ? 'Every Station Helper account can open the deployment screen until you switch them off again.' : 'No Station Helper account can open the app until you switch them on again.',
+          on ? 'Switch them on' : 'Switch them off', on ? 'ok' : 'accent').then(function (ok) {
+          if (ok) call('apiSetHelpersActive', on).then(function () { toast('Done', 'ok'); go('settings', 'people'); }).catch(fail);
+        });
+      }
+      var nHelpers = staff.filter(function (s) { return s.role === 'Station Helper'; }).length;
+      add(root, [
+        el('div', { class: 'row', style: 'margin-bottom:12px' }, [button('Add a person', function () { edit(null); }, 'primary'),
+          el('span', { class: 'spacer' }),
+          nHelpers ? button('Switch all helpers on', function () { helpers(true); }) : null,
+          nHelpers ? button('Switch all helpers off', function () { helpers(false); }) : null]),
+        table(['Name', 'School email', 'Role', 'Can open the app'], staff.map(function (s) {
+          return tr([s.name, s.email, s.role, el('span', { class: s.active ? 's-ok' : 's-bad', text: s.active ? 'Yes' : 'No' })], function () { edit(s); });
+        })),
+        el('p', { class: 'muted', style: 'margin-top:10px', text: 'Click a row to change it. Station Helper accounts are meant to be on only for deployment day.' })
+      ]);
+    }).catch(fail);
+  }
+</script>

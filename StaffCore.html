@@ -1,0 +1,472 @@
+<script>
+  /* Staff app: menu, Home, student list, student page, sending links, QR letters.
+     The menu only decides what is SHOWN. Every server function checks the
+     caller's role again, so hiding a button is never the security. */
+
+  var B = null;          // boot data from the server
+  var ROLE = '';
+  var VIEWS = {};
+  var MENU = [
+    { id: 'home', label: 'Home', roles: ['Admin', 'IT Staff'] },
+    { id: 'students', label: 'Students', roles: ['Admin', 'IT Staff'] },
+    { id: 'day', label: 'Deployment day', roles: ['Admin', 'IT Staff', 'Station Helper'] },
+    { id: 'gear', label: 'Chromebooks and repairs', roles: ['Admin', 'IT Staff'] },
+    { id: 'settings', label: 'Settings', roles: ['Admin'], push: true }
+  ];
+  // Screens reached from a button rather than the menu, and the menu item they belong under.
+  var PARENT_OF = { 'import': 'home', reports: 'home' };
+  function isAdmin() { return ROLE === 'Admin'; }
+  function plural(n, one, many) { return n + ' ' + (n === 1 ? one : (many || one + 's')); }
+
+  function start(boot) {
+    B = boot; ROLE = boot.user.role;
+    $('school').textContent = boot.school;
+    $('who').textContent = boot.user.name + ', ' + ROLE;
+    var nav = clear($('nav'));
+    var mine = MENU.filter(function (n) { return n.roles.indexOf(ROLE) >= 0; });
+    mine.forEach(function (n) {
+      nav.appendChild(el('button', { type: 'button', id: 'nav_' + n.id, class: n.push ? 'push' : '', text: n.label, onclick: function () { go(n.id); } }));
+    });
+    if (mine.length < 2) nav.className = 'menu hidden';
+    go(mine[0].id);
+  }
+
+  function go(id, arg) {
+    var active = PARENT_OF[id] || id;
+    MENU.forEach(function (n) {
+      var b = $('nav_' + n.id);
+      if (b) b.className = (n.push ? 'push ' : '') + (n.id === active ? 'on' : '');
+    });
+    // A fresh container per screen: a slow answer for a screen the user already left lands nowhere.
+    var root = clear($('main')).appendChild(el('div'));
+    window.scrollTo(0, 0);
+    VIEWS[id](root, arg);
+  }
+
+  /**
+   * Shows a screen straight away from what was loaded last time, then asks the
+   * server for the current data and redraws only if something changed. This is
+   * what makes moving between screens feel instant.
+   */
+  var LIVE = {}, FRESH = {};
+  if (BOOT.home) { LIVE['apiHome[]'] = JSON.stringify(BOOT.home); FRESH['apiHome[]'] = true; }
+  function live(root, fn, args, render) {
+    var key = fn + JSON.stringify(args || []), shown = null;
+    function paint(text) {
+      shown = text;
+      clear(root);
+      try { render(JSON.parse(text)); } catch (e) { fail(e); }
+    }
+    if (LIVE[key] !== undefined) paint(LIVE[key]);
+    else root.appendChild(el('p', { class: 'muted', text: 'Loading' }));
+    // Data that arrived with the page is already current: no need to ask again straight away.
+    if (FRESH[key]) { delete FRESH[key]; return; }
+    call.apply(null, [fn].concat(args || [])).then(function (data) {
+      var fresh = JSON.stringify(data);
+      LIVE[key] = fresh;
+      if (fresh === shown || !root.isConnected) return;
+      // Do not redraw under someone who is typing or has a box open; they get the new data on the next visit.
+      var active = document.activeElement;
+      var busyHere = shown !== null && (document.querySelector('.overlay') ||
+        (active && root.contains(active) && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName) && active.value));
+      if (!busyHere) paint(fresh);
+    }).catch(fail);
+  }
+
+  function statusEl(st) { return el('span', { class: st && st.tone ? 's-' + st.tone : '', text: st ? st.text : '' }); }
+  function button(label, fn, cls) { return el('button', { class: 'btn ' + (cls || ''), type: 'button', text: label, onclick: fn }); }
+  function section(title, kids) { return el('div', { class: 'sec' }, [title ? el('h2', { text: title }) : null, kids]); }
+
+  function table(headers, rows, cls) {
+    return el('div', { class: 'scroll' }, el('table', { class: 't ' + (cls || '') }, [
+      el('thead', {}, el('tr', {}, headers.map(function (h) { return el('th', { text: h }); }))),
+      el('tbody', {}, rows)
+    ]));
+  }
+  function tr(cells, onclick) {
+    return el('tr', { class: onclick ? 'click' : '', onclick: onclick, tabindex: onclick ? '0' : null,
+      onkeydown: onclick ? function (ev) { if (ev.key === 'Enter') onclick(ev); } : null },
+      cells.map(function (c) { return el('td', {}, c); }));
+  }
+  function printNode(node) {
+    clear($('printArea')).appendChild(node);
+    setTimeout(function () { window.print(); }, 150);
+  }
+  function today() { return new Date().toISOString().substring(0, 10); }
+
+  /* ================= Home: what to do next ================= */
+  VIEWS.home = function (root) {
+    live(root, 'apiHome', [], function (h) {
+      var admin = isAdmin();
+      function step(title, done, kids) { return el('li', { class: done ? 'finished' : '' }, [el('h2', { text: title }), kids]); }
+      function line(text, cls) { return el('p', { class: cls || '', text: text }); }
+      function actions() { return el('div', { class: 'row' }, Array.prototype.slice.call(arguments)); }
+
+      var s1 = step('Add students and Chromebooks', h.students > 0 && h.devices > 0, [
+        line(plural(h.students, 'student') + ' and ' + plural(h.devices, 'Chromebook') + ' are in the system.'),
+        admin ? actions(button('Import a list', function () { go('import'); }, h.students ? '' : 'primary'),
+          button('Add one student', function () { editStudent(null); })) : null
+      ]);
+
+      var s2 = step('Send each family its link', h.students > 0 && !h.notSent && !h.noEmail, [
+        h.linkReady ? null : el('div', { class: 'note bad', text: 'The parent web link is not set, so links cannot be sent. An Admin sets it under Settings, Technical.' }),
+        h.formsReady ? null : el('div', { class: 'note bad', text: 'A blank PDF form is not set. Until it is, signed forms are saved in a plain layout instead of on your own forms. An Admin sets the three blank forms under Settings, Technical, then presses Test the PDF forms.' }),
+        h.notSent ? line(plural(h.notSent, 'family has', 'families have') + ' not been sent the link.')
+          : line(h.students ? 'Every family with an email address has been sent its link.' : 'Add students first.', 'muted'),
+        admin && h.notSent ? actions(button('Send the link to ' + plural(h.notSent, 'family', 'families'), function () { sendFlow('invite'); }, 'primary')) : null,
+        h.noEmail ? line(plural(h.noEmail, 'student has', 'students have') + ' no parent email on file. Send a printed letter home or phone the family.') : null,
+        h.noEmail ? actions(button('Print ' + plural(h.noEmail, 'QR letter'), printNoEmailLetters),
+          button('Show these students', function () { go('students', { show: 'noemail' }); })) : null,
+        h.queued ? el('div', { class: 'note warn' }, [plural(h.queued, 'email is', 'emails are') + ' waiting because Gmail reached its daily limit. They go out by themselves tomorrow morning. ',
+          button('Cancel the waiting emails', function () {
+            confirmBox('Cancel the waiting emails?', h.queued + ' emails will not be sent. You can send them again later from this page.', 'Cancel the emails', 'accent').then(function (ok) {
+              if (ok) call('apiClearQueue').then(function () { go('home'); }).catch(fail);
+            });
+          }, 'small')]) : null,
+        admin && h.notSent ? line('Gmail will accept about ' + h.quota + ' more recipients today. Two parent emails count as two.', 'muted') : null
+      ]);
+
+      var s3 = step('Remind families who have not signed', h.students > 0 && h.signed === h.students, [
+        line(h.signed + ' of ' + plural(h.students, 'agreement') + ' ' + (h.signed === 1 ? 'is' : 'are') + ' signed.'),
+        h.toRemind ? line(plural(h.toRemind, 'family has', 'families have') + ' the link and ' + (h.toRemind === 1 ? 'has' : 'have') + ' not signed.') : null,
+        h.toRemind ? actions(admin ? button('Send a reminder to ' + plural(h.toRemind, 'family', 'families'), function () { sendFlow('reminder'); }, 'primary') : null,
+          button('Show who has not signed', function () { go('students', { show: 'notsigned' }); })) : null
+      ]);
+
+      var s4 = step('Deployment day', h.students > 0 && h.withDevice === h.students, [
+        line(h.withDevice + ' of ' + plural(h.students, 'student') + ' ' + (h.withDevice === 1 ? 'has' : 'have') + ' a Chromebook. ' +
+          h.readyNoDevice + ' more ' + (h.readyNoDevice === 1 ? 'is' : 'are') + ' ready for one. ' + h.notReady + ' ' + (h.notReady === 1 ? 'is' : 'are') + ' not ready.'),
+        B.deploymentDate ? line('Planned for ' + B.deploymentDate + '. ' + plural(h.inStock, 'Chromebook') + ' in stock.', 'muted') : null,
+        actions(button('Open the deployment screen', function () { go('day'); }, 'primary'),
+          button('List of students who are not ready', function () { go('reports'); }))
+      ]);
+
+      var claim = h.claims;
+      var s5 = step('After deployment', false, [
+        admin && h.assetTigerWaiting ? line(plural(h.assetTigerWaiting, 'check-out is', 'check-outs are') + ' not in Asset Tiger yet.') : null,
+        admin && h.assetTigerWaiting ? actions(button('Export for Asset Tiger', assetTigerExport, 'primary')) : null,
+        line(plural(h.openRepairs, 'repair or lost report is', 'repairs or lost reports are') + ' open. ' +
+          plural(h.loanersOut, 'loaner is', 'loaners are') + ' out' + (h.loanersLate ? ', ' + h.loanersLate + ' late.' : '.')),
+        h.onHold ? line(plural(h.onHold, 'Chromebook was', 'Chromebooks were') + ' not returned. Those records are on hold.', 's-bad') : null,
+        h.unpaid ? line(plural(h.unpaid, 'student share is', 'student shares are') + ' unpaid.') : null,
+        line('Claims over the last two years: ' + claim.rate + '% of Chromebooks. The VILS limit is ' + claim.threshold + '%.',
+          claim.level === 'over' ? 's-bad' : (claim.level === 'warn' ? 's-warn' : '')),
+        actions(button('Repairs and loaners', function () { go('gear', 'repairs'); }), button('Reports', function () { go('reports'); }),
+          button('Who got which Chromebook', function () { go('gear', 'checkouts'); }), button('Inventory report', function () { go('gear', 'devices'); }))
+      ]);
+
+      add(root, [el('h1', { text: B.campus + ' Chromebooks' }), el('ol', { class: 'steps' }, [s1, s2, s3, s4, s5])]);
+    });
+  };
+
+  function printNoEmailLetters() {
+    call('apiListStudents').then(function (list) {
+      printQr(list.filter(function (s) { return !s.hasEmail && !s.signed; }).map(function (s) { return s.id; }));
+    }).catch(fail);
+  }
+
+  /* ================= Students ================= */
+  var studentFilter = { q: '', grade: '', show: '' };
+
+  VIEWS.students = function (root, arg) {
+    if (arg && arg.show !== undefined) studentFilter = { q: '', grade: '', show: arg.show };
+    live(root, 'apiListStudents', [], function (list) {
+      var selected = {}, shown = [];
+      var body = el('div'), count = el('p', { class: 'muted', style: 'margin:0' }), picked = el('div', { class: 'note hidden' });
+      var q = el('input', { type: 'search', placeholder: 'Name or student ID', value: studentFilter.q, 'aria-label': 'Search students',
+        oninput: function () { studentFilter.q = q.value; draw(); } });
+      var grades = [el('option', { value: '', text: 'All grades' })];
+      for (var g = B.gradeMin; g <= B.gradeMax; g++) grades.push(el('option', { value: String(g), text: 'Grade ' + g, selected: studentFilter.grade === String(g) }));
+      var grade = el('select', { 'aria-label': 'Grade', onchange: function () { studentFilter.grade = grade.value; draw(); } }, grades);
+      var views = [['', 'Everyone'], ['notsigned', 'Has not signed'], ['notready', 'Not ready for a Chromebook'], ['noemail', 'No parent email'],
+        ['ready', 'Ready, no Chromebook yet'], ['device', 'Has a Chromebook']];
+      var show = el('select', { 'aria-label': 'Show', onchange: function () { studentFilter.show = show.value; draw(); } }, [
+        views.map(function (v) { return el('option', { value: v[0], text: v[1], selected: studentFilter.show === v[0] }); }),
+        el('optgroup', { label: 'Exact step' }, B.stages.map(function (s) { return el('option', { value: 'stage:' + s, text: s, selected: studentFilter.show === 'stage:' + s }); }))
+      ]);
+
+      function matches(s) {
+        var f = studentFilter, text = (s.first + ' ' + s.last + ' ' + s.id).toLowerCase();
+        if (f.q && !f.q.toLowerCase().split(/\s+/).every(function (w) { return text.indexOf(w) >= 0; })) return false;
+        if (f.grade && s.grade !== f.grade) return false;
+        if (f.show.indexOf('stage:') === 0) return s.stage === f.show.substring(6);
+        if (f.show === 'notsigned') return !s.signed;
+        if (f.show === 'notready') return !s.ready;
+        if (f.show === 'noemail') return !s.hasEmail && !s.signed;
+        if (f.show === 'ready') return s.ready && !s.tag;
+        if (f.show === 'device') return !!s.tag;
+        return true;
+      }
+      function ids() { return Object.keys(selected); }
+      function draw() {
+        var all = list.filter(matches);
+        shown = all.slice(0, 300);
+        count.textContent = plural(all.length, 'student') + (all.length > shown.length ? '. Showing the first ' + shown.length + '; search to narrow the list.' : '');
+        var n = ids().length;
+        clear(picked).className = n ? 'note' : 'note hidden';
+        if (n) add(picked, el('div', { class: 'row' }, [el('b', { text: n + ' selected' }), el('span', { class: 'spacer' }),
+          button('Email their link', function () { sendFlow('selected', ids()); }, 'small'),
+          button('Print QR letters', function () { printQr(ids()); }, 'small'),
+          button('Clear', function () { selected = {}; draw(); }, 'small')]));
+        var heads = ['Student', 'Grade', 'Where they are', 'Chromebook'];
+        if (isAdmin()) heads.unshift('');
+        clear(body).appendChild(table(heads, shown.map(function (s) {
+          var cells = [[el('b', { text: s.last + ', ' + s.first }), el('div', { class: 'muted', text: 'ID ' + s.id })], s.grade, statusEl(s.status), s.tag || ''];
+          if (isAdmin()) cells.unshift(el('input', { type: 'checkbox', checked: !!selected[s.id], 'aria-label': 'Select ' + s.first + ' ' + s.last,
+            style: 'width:22px;height:22px', onclick: function (ev) {
+              ev.stopPropagation();
+              if (ev.target.checked) selected[s.id] = true; else delete selected[s.id];
+              draw();
+            } }));
+          return tr(cells, function () { openStudent(s.id); });
+        })));
+      }
+      add(root, [
+        el('div', { class: 'row', style: 'margin-bottom:12px' }, [el('h1', { text: 'Students', style: 'margin:0' }), el('span', { class: 'spacer' }),
+          isAdmin() ? button('Add a student', function () { editStudent(null); }) : null]),
+        el('div', { class: 'grid' }, [q, grade, show]),
+        el('div', { class: 'row', style: 'margin:12px 0 6px' }, [count, el('span', { class: 'spacer' }),
+          isAdmin() ? button('Select all in this list', function () { shown.forEach(function (s) { selected[s.id] = true; }); draw(); }, 'small') : null]),
+        picked, body
+      ]);
+      draw();
+    });
+  };
+
+  /* ---------- Student page ---------- */
+  function openStudent(id) {
+    call('apiStudentDetail', id).then(function (s) {
+      var m, name = s.first_name + ' ' + s.last_name;
+      function reload() { m.close(); openStudent(id); }
+      function act(promise, msg) { promise.then(function () { if (msg) toast(msg, 'ok'); reload(); }).catch(fail); }
+      function kv(pairs) {
+        var dl = el('dl', { class: 'kv' });
+        pairs.forEach(function (p) { if (p && p[1]) add(dl, [el('dt', { text: p[0] }), el('dd', {}, p[1])]); });
+        return dl;
+      }
+      function openPdf(which) { call('apiGetPdf', id, typeof which === 'string' ? which : 'checkout').then(function (f) { download(f.name, f.mime, f.base64, true); }).catch(fail); }
+      function copyLink() { call('apiGetLink', id).then(function (r) { copyText(r.link); }).catch(fail); }
+      function setForm(key, status, label) { act(call('apiSetOutsideForm', id, key, status), label + ' saved'); }
+
+      // The one obvious next thing for this student.
+      var main = null;
+      if (!s.signed_date && s.link_active) {
+        main = isAdmin() && s.hasEmail
+          ? button(s.invite_first_sent ? 'Send a reminder' : 'Send the link', function () { sendFlow('selected', [id], reload); }, 'primary')
+          : button('Copy the link', copyLink, 'primary');
+      } else if (s.step === 'forms') {
+        var dpOpen = s.dp_status !== 'Verified by staff';
+        main = button(dpOpen ? 'Digital Promise form received' : 'Verizon release received', function () {
+          setForm(dpOpen ? 'dp' : 'vz', 'Verified by staff', dpOpen ? 'Digital Promise form' : 'Verizon release');
+        }, 'primary');
+      } else if (s.step === 'verify' || s.step === 'assign' || s.step === 'check') {
+        main = button('Continue on the deployment screen', function () { m.close(); go('day', { id: id }); }, 'primary');
+      } else if (s.has_pdf) main = button('Open the signed agreement', openPdf, 'primary');
+
+      var more = [
+        s.has_pdf ? button('Open the signed agreement', openPdf) : null,
+        s.has_record ? button('Open the check-out record', function () { openPdf('record'); }) : null,
+        s.has_dp_pdf ? button('Open the Digital Promise agreement', function () { openPdf('dp'); }) : null,
+        s.has_vz_pdf ? button('Open the Verizon release', function () { openPdf('vz'); }) : null,
+        s.signed_date ? button(s.has_pdf ? 'Make the PDFs again' : 'Make the PDFs', function () { act(call('apiRegeneratePdf', id), 'PDFs saved'); }) : null,
+        button('Copy the link', copyLink),
+        s.link_active ? button('Print QR letter', function () { printQr([id]); }) : null,
+        isAdmin() && s.link_active && s.hasEmail ? button('Email the link again', function () { sendFlow('selected', [id], reload); }) : null,
+        isAdmin() ? button('Make a new link', function () {
+          confirmBox('Make a new link for ' + s.first_name + '?', 'The old link stops working straight away.' +
+            (s.signed_date ? '\n\nThis agreement is already signed. A new link lets the family sign again. The new PDF replaces the current one, and the current one is kept in the _previous folder.' : ''),
+            'Make a new link', 'accent').then(function (ok) { if (ok) act(call('apiNewLink', id), 'New link made'); });
+        }) : null,
+        isAdmin() ? button('Edit student and parent details', function () { editStudent(s, reload); }) : null,
+        s.asset_tag ? button('New repair', function () { newRepair('repair', s, reload); }) : null,
+        s.asset_tag ? button('Report lost or stolen', function () { newRepair('lost', s, reload); }, 'danger') : null,
+        s.asset_tag ? button('Chromebook returned', function () {
+          promptText('Chromebook ' + s.asset_tag + ' returned', 'Reason and condition (withdrawn, transferred, graduated)').then(function (note) {
+            if (note !== null) act(call('apiReturnDevice', id, note), 'Chromebook is back in stock');
+          });
+        }) : null,
+        s.asset_tag ? button('Chromebook not returned', function () {
+          promptText('Chromebook not returned: put records on hold', 'Note (optional)').then(function (note) {
+            if (note !== null) act(call('apiMarkNotReturned', id, note), 'Records are on hold');
+          });
+        }, 'danger') : null
+      ];
+
+      function formRow(key, label, status, hasFile) {
+        var sel = el('select', { style: 'max-width:260px;margin:0', 'aria-label': label, onchange: function () { setForm(key, sel.value, label); } },
+          [['Not started', 'Not received'], ['Signed', 'Parent says it is signed'], ['Signed online', 'Signed in the app'], ['Verified by staff', 'Paper copy received and checked']].map(function (o) {
+            return el('option', { value: o[0], text: o[1], selected: o[0] === (status || 'Not started') });
+          }));
+        return el('div', { class: 'row', style: 'margin-bottom:8px' }, [el('span', { text: label, style: 'min-width:240px' }), sel,
+          key === 'dp' && s.has_dp_pdf ? button('Open', function () { openPdf('dp'); }, 'small') : null,
+          key === 'vz' && s.has_vz_pdf ? button('Open', function () { openPdf('vz'); }, 'small') : null,
+          hasFile ? button('See the upload', function () {
+            call('apiGetOutsideFile', id, key).then(function (f) { download(f.name, f.mime, f.base64, true); }).catch(fail);
+          }, 'small') : null]);
+      }
+
+      var body = el('div', {}, [
+        el('p', { class: 'muted', text: 'Grade ' + s.grade + ', student ID ' + s.student_id }),
+        el('p', { style: 'font-size:20px' }, statusEl(s.status)),
+        s.readiness.ready ? null : el('div', { class: 'note warn', text: 'Before a Chromebook can be issued: ' + s.readiness.missing.join('; ') + '.' }),
+        main ? el('div', { class: 'row' }, main) : null,
+        el('details', {}, [el('summary', { text: 'More actions' }), el('div', { class: 'row' }, more)]),
+
+        section('Agreement', kv([
+          ['Signed', s.signed_date ? s.signed_date + ' by ' + s.signer_name : 'Not signed'], ['Record', s.agreement_id],
+          ['Link sent', s.invite_first_sent], ['Reminders sent', s.reminders_count !== '0' ? s.reminders_count : ''],
+          ['Link opened', s.link_opened_date],
+          ['Link', s.link_active ? 'Working' : (s.signed_date ? 'Closed after signing' : 'Switched off')]])),
+        section('Other forms', [formRow('dp', 'Digital Promise agreement', s.dp_status, s.has_dp_file),
+          formRow('vz', 'Verizon General Release' + (B.verizonRequired ? '' : ' (optional)'), s.vz_status, s.has_vz_file),
+          s.vz_consent ? el('div', { class: /NOT/.test(s.vz_consent) ? 'note warn' : 'muted', text: 'Photo and video release: ' + s.vz_consent +
+            (/NOT/.test(s.vz_consent) ? '. Verizon may not photograph or record this student.' : '.') }) : null]),
+        s.asset_tag ? section('Chromebook', kv([['Asset tag', s.asset_tag], ['Serial number', s.device && s.device.serial_number],
+          ['Forms checked', s.station1_date], ['Checked working', s.working_date]])) : null,
+        s.repairs.length ? section('Repairs', table(['Opened', 'Type', 'Problem', 'Status', 'Cost', 'Student pays'], s.repairs.map(function (r) {
+          return tr([r.opened_date.substring(0, 10), r.type + (r.repair_number ? ' ' + r.repair_number : ''), r.description, r.status,
+            r.cost ? '$' + r.cost : '', r.student_share ? '$' + r.student_share : '']);
+        }))) : null,
+        s.canSeeContact ? section('Family', kv([
+          ['Parent 1', [s.parent1_name, s.parent1_email, s.parent1_phone].filter(Boolean).join(', ')],
+          ['Parent 2', [s.parent2_name, s.parent2_email, s.parent2_phone].filter(Boolean).join(', ')],
+          ['Signed by', s.signed_date ? [s.signer_name, s.signer_email, s.signer_phone].filter(Boolean).join(', ') : ''],
+          ['Date of birth', s.dob], ['Language', s.language === 'es' ? 'Spanish' : 'English']])) : null,
+        el('details', {}, [el('summary', { text: 'History (' + s.activity.length + ')' }),
+          el('div', {}, table(['When', 'Who', 'What', 'Details'], s.activity.map(function (a) { return tr([a.timestamp, a.user, a.action, a.details]); })))])
+      ]);
+      m = modal(name, body, [{ label: 'Close' }], true);
+    }).catch(fail);
+  }
+
+  /** Small text prompt. Resolves to the text, or null if cancelled. */
+  function promptText(title, label, multiline) {
+    return new Promise(function (resolve) {
+      var input = multiline ? el('textarea', { maxlength: '1000' }) : el('input', { type: 'text', maxlength: '300' });
+      modal(title, field(label, input), [
+        { label: 'Cancel', onClick: function (c) { c(); resolve(null); } },
+        { label: 'Save', cls: 'primary', onClick: function (c) { c(); resolve(input.value.trim()); } }
+      ]);
+    });
+  }
+
+  /** Add (s = null) or edit a student. Admin only. */
+  function editStudent(s, done) {
+    var isNew = !s;
+    s = s || {};
+    var f = {};
+    function inp(key, label, type, hint) {
+      f[key] = el('input', { type: type || 'text', value: s[key] || '', readOnly: key === 'student_id' && !isNew, maxlength: '120' });
+      return field(label, f[key], hint);
+    }
+    f.language = el('select', {}, [el('option', { value: 'en', text: 'English', selected: s.language !== 'es' }),
+      el('option', { value: 'es', text: 'Spanish', selected: s.language === 'es' })]);
+    var body = el('div', {}, [
+      el('div', { class: 'grid' }, [inp('student_id', 'Student ID'), inp('grade', 'Grade'), inp('first_name', 'First name'), inp('last_name', 'Last name'),
+        inp('dob', 'Date of birth', 'date', '(optional)'), field('Language for emails', f.language)]),
+      el('h3', { text: 'Parent or guardian 1', style: 'margin-top:8px' }),
+      el('div', { class: 'grid' }, [inp('parent1_name', 'Name'), inp('parent1_email', 'Email', 'email'), inp('parent1_phone', 'Phone', 'tel')]),
+      el('h3', { text: 'Parent or guardian 2 (optional)', style: 'margin-top:8px' }),
+      el('div', { class: 'grid' }, [inp('parent2_name', 'Name'), inp('parent2_email', 'Email', 'email'), inp('parent2_phone', 'Phone', 'tel')]),
+      el('p', { class: 'muted', text: isNew ? 'Saving does not send any email. You send the link afterwards.'
+        : 'Each change is kept in the student\'s history with the old and new value.' })
+    ]);
+    modal(isNew ? 'Add a student' : 'Edit ' + s.first_name + ' ' + s.last_name, body, [
+      { label: 'Cancel' },
+      { label: 'Save', cls: 'primary', onClick: function (close) {
+        var data = {};
+        Object.keys(f).forEach(function (k) { data[k] = f[k].value.trim(); });
+        call('apiSaveStudent', data, isNew).then(function () {
+          close(); toast(isNew ? 'Student added' : 'Saved', 'ok');
+          if (done) done(); else go('students');
+        }).catch(fail);
+      } }
+    ], true);
+  }
+
+  /* ---------- Sending links (Admin) ---------- */
+  function sendFlow(kind, ids, done) {
+    call('apiSendPreview', kind, ids || null).then(function (p) {
+      if (!p.ids.length) {
+        return toast('There is nobody to email.' + (p.noEmail ? ' ' + p.noEmail + ' have no email on file.' : '') + (p.alreadySigned ? ' ' + p.alreadySigned + ' already signed.' : ''));
+      }
+      var n = plural(p.ids.length, 'email');
+      var body = el('div', {}, [
+        el('p', { text: 'Each family gets its own link, in its own language. If two parent emails are on file, both get it.' }),
+        p.noEmail ? el('div', { class: 'note warn', text: plural(p.noEmail, 'student is', 'students are') + ' left out: no email on file.' }) : null,
+        p.alreadySigned ? el('div', { class: 'note', text: plural(p.alreadySigned, 'student is', 'students are') + ' left out: already signed.' }) : null,
+        p.quota < p.ids.length * 2 ? el('div', { class: 'note warn', text: 'Gmail will accept about ' + p.quota + ' more recipients today. Whatever is left over is sent tomorrow morning without you doing anything.' }) : null,
+        el('h3', { text: 'This is what the first family receives' }),
+        el('div', { class: 'box', style: 'background:var(--soft)' }, [
+          el('div', { class: 'muted', text: 'To: ' + p.preview.to }), el('div', {}, el('b', { text: p.preview.subject })),
+          el('pre', { style: 'white-space:pre-wrap;font:inherit;margin:8px 0 0', text: p.preview.body })
+        ])
+      ]);
+      modal('Send ' + n + '?', body, [{ label: 'Do not send' }, { label: 'Send ' + n, cls: 'accent', onClick: function (close) {
+        close(); runSend(p.ids, p.batchSize, done);
+      } }]);
+    }).catch(fail);
+  }
+
+  function runSend(ids, batchSize, done) {
+    var total = ids.length, sent = 0, skipped = [];
+    var status = el('p', { style: 'font-size:20px', text: 'Starting' });
+    var m = modal('Sending emails', el('div', {}, [status, el('p', { class: 'muted', text: 'Keep this page open until it finishes.' })]), []);
+    function finish(text) {
+      m.close();
+      modal('Emails sent', el('div', {}, [el('p', { text: text }),
+        skipped.length ? el('div', { class: 'note warn', text: 'Not sent: ' + skipped.join(', ') }) : null]),
+        [{ label: 'OK', cls: 'primary', onClick: function (c) { c(); if (done) done(); else go('home'); } }]);
+    }
+    function next(rest) {
+      if (!rest.length) return finish(plural(sent, 'email') + ' sent.');
+      var batch = rest.slice(0, batchSize);
+      call('apiSendBatch', batch).then(function (r) {
+        sent += r.sent; skipped = skipped.concat(r.skipped);
+        status.textContent = (total - rest.length + batch.length - r.notSent.length) + ' of ' + total;
+        if (r.quotaReached) {
+          var remaining = r.notSent.concat(rest.slice(batchSize));
+          return call('apiQueueSends', remaining).then(function () {
+            finish(plural(sent, 'email') + ' sent. Gmail reached its daily limit, so ' + remaining.length +
+              ' are waiting. They are sent tomorrow morning without you doing anything.');
+          });
+        }
+        next(rest.slice(batchSize));
+      }).catch(function (e) { m.close(); fail(e); });
+    }
+    next(ids);
+  }
+
+  /* ---------- QR letters ---------- */
+  var QR_TEXT = {
+    en: { title: 'Chromebook Checkout Agreement', line1: 'Please sign the Chromebook agreement for', how: 'Open the camera on your phone, point it at this code, and tap the link. It takes about 5 minutes.',
+      or: 'Or type this address in a web browser:', keep: 'This code is only for your student. Please do not share it.', help: 'Questions:', grade: 'grade ' },
+    es: { title: 'Acuerdo de préstamo de Chromebook', line1: 'Por favor firme el acuerdo de Chromebook de', how: 'Abra la cámara de su teléfono, apunte a este código y toque el enlace. Toma unos 5 minutos.',
+      or: 'O escriba esta dirección en un navegador web:', keep: 'Este código es solo para su estudiante. Por favor no lo comparta.', help: 'Preguntas:', grade: 'grado ' }
+  };
+  function qrSvg(text) {
+    var qr = qrcode(0, 'M');
+    qr.addData(text);
+    qr.make();
+    var box = el('div');
+    box.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });  // library output: SVG shapes only
+    return box;
+  }
+  function printQr(ids) {
+    call('apiQrData', ids).then(function (r) {
+      if (!r.letters.length) return toast('Nothing to print. These students have already signed.');
+      var wrap = el('div');
+      r.letters.forEach(function (l) {
+        var x = QR_TEXT[l.lang];
+        wrap.appendChild(el('div', { class: 'letter', lang: l.lang }, [
+          el('h1', { text: r.school }), el('h2', { text: x.title }),
+          el('p', {}, [x.line1 + ' ', el('b', { text: l.name + ' (' + x.grade + l.grade + ')' }), '.']),
+          qrSvg(l.link), el('p', { text: x.how }), el('p', { text: x.or }),
+          el('p', { style: 'font-family:monospace;font-size:13px;word-break:break-all', text: l.link }),
+          el('p', { text: x.keep }), el('p', { text: x.help + ' ' + r.itEmail })
+        ]));
+      });
+      printNode(wrap);
+    }).catch(fail);
+  }
+</script>

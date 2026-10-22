@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <?!= include_('Styles') ?>
+</head>
+<body class="parent">
+  <div class="school">
+    <div class="name" id="schoolName"></div>
+    <div class="addr" id="schoolAddr"></div>
+    <div class="addr" id="schoolPhones"></div>
+    <div class="lang" role="group" aria-label="Language / Idioma">
+      <button type="button" id="langEn" lang="en">English</button>
+      <button type="button" id="langEs" lang="es">Español</button>
+    </div>
+  </div>
+  <main id="app"></main>
+
+  <script>var BOOT = <?!= boot ?>;</script>
+  <?!= include_('ClientCore') ?>
+  <script>
+    /* Parent / student signing page. Parents do not log in: the random code in
+       their personal link identifies the student. */
+
+    var lang = /^es/i.test(navigator.language || '') ? 'es' : 'en';
+    var langChosen = false;
+    var code = BOOT.code;
+    var DATA = null;
+    var app = $('app');
+
+    function t(key) { return (BOOT.str[lang] || {})[key] || BOOT.str.en[key] || key; }
+    function term(name) { return (lang === 'es' && BOOT.terms[name]) || name; }
+    /** Element whose text follows the language toggle. */
+    function T(tag, key, attrs) {
+      attrs = attrs || {};
+      attrs['data-i'] = key;
+      attrs.text = t(key);
+      return el(tag, attrs);
+    }
+    function relabel() {
+      document.documentElement.lang = lang;
+      Array.prototype.forEach.call(document.querySelectorAll('[data-i]'), function (e) { e.textContent = t(e.getAttribute('data-i')); });
+      Array.prototype.forEach.call(document.querySelectorAll('[data-term]'), function (e) { e.textContent = term(e.getAttribute('data-term')); });
+      $('langEn').className = lang === 'en' ? 'on' : '';
+      $('langEs').className = lang === 'es' ? 'on' : '';
+      $('langEn').setAttribute('aria-pressed', lang === 'en');
+      $('langEs').setAttribute('aria-pressed', lang === 'es');
+    }
+    function setLang(l, chosen) { lang = l; if (chosen) langChosen = true; relabel(); }
+    $('langEn').onclick = function () { setLang('en', true); };
+    $('langEs').onclick = function () { setLang('es', true); };
+
+    $('schoolName').textContent = BOOT.school;
+    $('schoolAddr').textContent = BOOT.address;
+    $('schoolPhones').textContent = BOOT.phones;
+
+    function itLink() { return el('a', { href: 'mailto:' + BOOT.itEmail, text: BOOT.itEmail }); }
+
+    function show(nodes) { clear(app); add(app, nodes); relabel(); window.scrollTo(0, 0); }
+
+    function viewInvalid() {
+      show(el('div', {}, [T('h1', 'invalidTitle'), el('p', {}, [T('span', 'invalidMsg'), ' ', itLink(), '.'])]));
+    }
+
+    /** One row per signed PDF, each with its own Download button. */
+    function downloadList(files) {
+      if (!files || !files.length) return null;
+      var label = { checkout: 'docCheckout', dp: 'docDp', vz: 'docVz' };
+      return el('div', { class: 'sec' }, [T('h2', 'downloadTitle'), T('p', 'downloadHint', { class: 'muted' }),
+        files.map(function (f) {
+          return el('div', { class: 'row', style: 'border-top:1px solid var(--line);padding:10px 0' }, [
+            el('div', { style: 'flex:1;min-width:150px' }, [T('b', label[f.kind] || 'docCheckout'), el('div', { class: 'muted', style: 'word-break:break-all', text: f.name })]),
+            T('button', 'downloadBtn', { class: 'btn primary', type: 'button', onclick: function () { download(f.name, 'application/pdf', f.base64, true); } })
+          ]);
+        })]);
+    }
+
+    function viewSigned(date, canDownload) {
+      var slot = el('div');
+      if (canDownload) slot.appendChild(T('button', 'downloadAgain', { class: 'btn primary', type: 'button', onclick: function () {
+        call('apiParentDocs', code).then(function (files) { clear(slot).appendChild(downloadList(files)); relabel(); })
+          .catch(function () { clear(slot).appendChild(el('p', { class: 'note warn' }, [T('span', 'downloadEnded'), ' ', itLink(), '.'])); relabel(); });
+      } }));
+      show(el('div', {}, [
+        el('div', { class: 'banner ok' }, T('span', 'alreadySigned')),
+        el('p', {}, [T('span', 'alreadySignedMsg'), ' ', el('b', { text: date || '' }), '.']),
+        slot,
+        el('p', { class: 'muted', style: 'margin-top:12px' }, [T('span', 'alreadySignedHelp'), ' ', itLink(), '.'])
+      ]));
+    }
+
+    /* ---------- Backup lookup: student ID + date of birth ---------- */
+    function viewFind(message) {
+      var id = el('input', { type: 'text', autocomplete: 'off', inputmode: 'text' });
+      var dob = el('input', { type: 'date' });
+      var btn = T('button', 'findBtn', { class: 'btn primary big', type: 'submit', style: 'margin-top:6px' });
+      var form = el('form', { onsubmit: function (ev) {
+        ev.preventDefault();
+        if (!id.value.trim() || !dob.value) return;
+        btn.disabled = true;
+        call('apiParentFind', id.value.trim(), dob.value).then(function (r) {
+          if (r.state === 'found') { code = r.code; load(); }
+          else viewFind(r.state === 'locked' ? 'findLocked' : 'findFail');
+        }).catch(function () { viewFind('errGeneric'); });
+      } }, [
+        T('h1', 'findTitle'), T('p', 'findIntro'),
+        message ? el('div', { class: 'note bad', role: 'alert' }, T('span', message)) : null,
+        el('label', { class: 'field' }, [T('span', 'studentId'), id]),
+        el('label', { class: 'field' }, [T('span', 'dob'), dob]),
+        btn
+      ]);
+      show(form);
+    }
+
+    /* ---------- Signature pad (HTML canvas, in the browser only) ---------- */
+    function sigPad(labelKey, hintKey) {
+      var canvas = el('canvas', { class: 'sig', tabindex: '0', role: 'img' });
+      var ctx = null, drawing = false, inked = false, last = null;
+      function init() {
+        var r = canvas.getBoundingClientRect();
+        var dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(r.width * dpr);
+        canvas.height = Math.round(r.height * dpr);
+        ctx = canvas.getContext('2d');
+        ctx.scale(dpr, dpr);
+        ctx.lineWidth = 2.4; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#0b1a33';
+      }
+      function pos(ev) { var r = canvas.getBoundingClientRect(); return { x: ev.clientX - r.left, y: ev.clientY - r.top }; }
+      canvas.addEventListener('pointerdown', function (ev) {
+        if (!ctx) init();
+        ev.preventDefault();
+        drawing = true; last = pos(ev);
+        try { canvas.setPointerCapture(ev.pointerId); } catch (e) { /* ignore */ }
+        ctx.beginPath(); ctx.arc(last.x, last.y, 1.2, 0, Math.PI * 2); ctx.fillStyle = '#0b1a33'; ctx.fill();
+      });
+      canvas.addEventListener('pointermove', function (ev) {
+        if (!drawing) return;
+        ev.preventDefault();
+        var p = pos(ev);
+        ctx.beginPath(); ctx.moveTo(last.x, last.y); ctx.lineTo(p.x, p.y); ctx.stroke();
+        if (Math.abs(p.x - last.x) + Math.abs(p.y - last.y) > 2) inked = true;
+        last = p;
+      });
+      function stop() { drawing = false; }
+      canvas.addEventListener('pointerup', stop);
+      canvas.addEventListener('pointercancel', stop);
+      var node = el('div', {}, [
+        T('p', hintKey), canvas,
+        el('div', { class: 'row end', style: 'margin-top:6px' },
+          T('button', 'clear', { class: 'btn small', type: 'button', onclick: function () {
+            if (!ctx) init();
+            ctx.clearRect(0, 0, canvas.width, canvas.height); inked = false;
+          } }))
+      ]);
+      // The saved image is cropped to the ink, so it fits a signature line on the PDF.
+      function data() {
+        var w = canvas.width, h = canvas.height, px = ctx.getImageData(0, 0, w, h).data;
+        var x0 = w, y0 = h, x1 = -1, y1 = -1;
+        for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
+          if (px[(y * w + x) * 4 + 3]) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+        }
+        if (x1 < 0) return canvas.toDataURL('image/png');
+        x0 = Math.max(0, x0 - 6); y0 = Math.max(0, y0 - 6); x1 = Math.min(w - 1, x1 + 6); y1 = Math.min(h - 1, y1 + 6);
+        var out = document.createElement('canvas');
+        out.width = x1 - x0 + 1; out.height = y1 - y0 + 1;
+        out.getContext('2d').drawImage(canvas, x0, y0, out.width, out.height, 0, 0, out.width, out.height);
+        return out.toDataURL('image/png');
+      }
+      return { node: node, init: init, has: function () { return inked; }, data: data };
+    }
+
+    /* ---------- Outside forms (Digital Promise, Verizon) ---------- */
+    function readUpload(file) {
+      return new Promise(function (resolve, reject) {
+        if (!file) return resolve(null);
+        if (file.type === 'application/pdf') {
+          if (file.size > 5 * 1024 * 1024) return reject(new Error('file'));
+          var fr = new FileReader();
+          fr.onload = function () { resolve({ base64: String(fr.result).split(',')[1] }); };
+          fr.onerror = function () { reject(new Error('file')); };
+          fr.readAsDataURL(file);
+          return;
+        }
+        // Photos are shrunk in the browser so the upload is quick on a phone.
+        var url = URL.createObjectURL(file), img = new Image();
+        img.onload = function () {
+          var scale = Math.min(1, 1800 / Math.max(img.width, img.height));
+          var c = document.createElement('canvas');
+          c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          URL.revokeObjectURL(url);
+          resolve({ base64: c.toDataURL('image/jpeg', 0.82).split(',')[1] });
+        };
+        img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('file')); };
+        img.src = url;
+      });
+    }
+
+    function outsideForm(key, nameKey, url, done) {
+      var state = { claimed: false, input: null };
+      var body;
+      if (done) body = T('p', 'claimYes', { class: 's-ok' });
+      else if (DATA.method === 'upload') {
+        state.input = el('input', { type: 'file', accept: 'image/*,application/pdf', style: 'margin-top:6px;font-size:15px;max-width:100%' });
+        body = [el('label', { class: 'field' }, [T('span', 'uploadLabel'), state.input]), T('p', 'uploadLater', { class: 'muted' })];
+      } else {
+        var yes = el('input', { type: 'radio', name: 'claim_' + key, onchange: function () { state.claimed = true; } });
+        var no = el('input', { type: 'radio', name: 'claim_' + key, checked: true, onchange: function () { state.claimed = false; } });
+        body = [el('label', { class: 'check' }, [yes, T('span', 'claimYes')]), el('label', { class: 'check' }, [no, T('span', 'claimNo')])];
+      }
+      state.node = el('div', { style: 'margin-top:14px' }, [
+        T('h3', nameKey),
+        safeUrl(url) ? el('p', {}, el('a', { href: safeUrl(url), target: '_blank', rel: 'noopener' }, T('span', 'openForm'))) : null,
+        body
+      ]);
+      return state;
+    }
+
+    /* ---------- Partner documents shown word for word ---------- */
+    /** Renders a document from DocText.gs. The student is the End User, so their name fills "{{end_user}}". */
+    function renderDoc(text, endUser) {
+      var nodes = [el('p', { style: 'text-align:center;font-weight:700;margin-bottom:12px', lang: 'en' }, text.subtitle ? [text.subtitle, el('br'), text.title] : [text.title])];
+      text.blocks.forEach(function (b) {
+        if (b.h) return nodes.push(el('h3', { text: b.h, lang: 'en', style: 'margin-top:12px' }));
+        var parts = b.p.split('{{end_user}}'), kids = [parts[0]];
+        if (parts.length > 1) kids.push(el('b', { text: endUser }), parts[1]);
+        nodes.push(el('p', { lang: 'en', style: b.strong ? 'font-weight:700' : '' }, kids));
+      });
+      return el('div', { class: 'box', style: 'font-size:15px' }, nodes);
+    }
+
+    /* ---------- All the forms, one short step at a time ---------- */
+    function viewForm() {
+      var d = DATA;
+      function tableOf(headKeys, rows) {
+        return el('div', { class: 'scroll' }, el('table', { class: 't b', style: 'margin-bottom:14px' }, [
+          el('thead', {}, el('tr', {}, headKeys.map(function (k) { return typeof k === 'string' ? T('th', k) : k; }))),
+          el('tbody', {}, rows)
+        ]));
+      }
+      var models = d.models && d.models.length ? d.models : [''];
+      var costs = tableOf([T('th', 'component')].concat(models.map(function (m) { return el('th', { text: m || t('cost'), style: 'text-align:right' }); })), d.costs.map(function (c) {
+        return el('tr', {}, [el('td', { 'data-term': c.name, text: term(c.name) })].concat(models.map(function (m, i) {
+          var v = (c.costs || [c.cost])[i];
+          return el('td', { text: v === undefined || v === '' ? '' : '$' + Number(v).toFixed(2), style: 'text-align:right' });
+        })));
+      }));
+      var shares = tableOf([el('th'), 'schoolShare', 'studentShare'], d.shares.map(function (s) {
+        return el('tr', {}, [el('td', { 'data-term': s.name, text: term(s.name) }), el('td', { text: s.school + '%' }), el('td', { text: s.student + '%' })]);
+      }));
+
+      var name = el('input', { type: 'text', autocomplete: 'name', maxlength: '100' });
+      var phone = el('input', { type: 'tel', autocomplete: 'tel', maxlength: '30' });
+      var email = el('input', { type: 'email', autocomplete: 'email', maxlength: '120' });
+      var agree = el('input', { type: 'checkbox' });
+      var parentPad = sigPad('parentSig', 'sigHintParent');
+      var studentPad = sigPad('studentSig', 'sigHintStudent');
+      var dp = d.online ? null : outsideForm('dp', 'dpName', d.dpUrl, d.dpDone);
+      var vz = d.online ? null : outsideForm('vz', 'vzName', d.vzUrl, d.vzDone);
+      var errBox = el('div', { class: 'note bad hidden', role: 'alert' });
+
+      function showErr(key, target) {
+        clear(errBox).appendChild(T('span', key));
+        if (key === 'errGeneric') add(errBox, [' ', itLink(), '.']);
+        errBox.className = 'note bad';
+        relabel();
+        if (target && target.focus) target.focus();
+        errBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return false;
+      }
+
+      // Each step: a title, its content, and a check that must pass before moving on.
+      var steps = [
+        { title: 'stepRead', check: function () { return agree.checked || showErr('errAgree', agree); }, node: el('div', {}, [
+          el('dl', { class: 'kv', style: 'margin-bottom:14px' }, [
+            T('dt', 'studentName'), el('dd', {}, el('b', { text: d.student.first + ' ' + d.student.last })),
+            T('dt', 'grade'), el('dd', {}, el('b', { text: d.student.grade }))
+          ]),
+          T('h2', 'title'), T('p', 'intro'), T('h3', 'costTitle'), costs, T('p', 'shareText'), shares,
+          T('p', 'statement'),
+          safeUrl(d.policyUrl) ? el('p', {}, el('a', { href: safeUrl(d.policyUrl), target: '_blank', rel: 'noopener' }, T('span', 'policyLink'))) : null,
+          el('label', { class: 'check', style: 'border-top:1px solid var(--line);margin-top:8px;padding-top:14px' }, [agree, T('span', 'agree')])
+        ]) },
+        { title: 'stepInfo', check: function () {
+          if (!name.value.trim() || !phone.value.trim() || !email.value.trim()) return showErr('errRequired', !name.value.trim() ? name : (!phone.value.trim() ? phone : email));
+          if (phone.value.replace(/\D/g, '').length < 7) return showErr('errPhone', phone);
+          if (!/^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/.test(email.value.trim())) return showErr('errEmail', email);
+          return true;
+        }, node: el('div', {}, [
+          el('label', { class: 'field' }, [T('span', 'parentName'), name]),
+          el('label', { class: 'field' }, [T('span', 'phone'), phone]),
+          el('label', { class: 'field' }, [T('span', 'email'), email]),
+          el('label', { class: 'field' }, [T('span', 'date'), el('input', { type: 'text', value: d.today, readOnly: true })]),
+          d.online ? null : el('div', { class: 'sec' }, [T('h2', 'outsideTitle'), T('p', 'outsideIntro', { class: 'muted' }), dp.node, vz.node])
+        ]) }
+      ];
+
+      var pgInitials = el('input', { type: 'text', maxlength: '4', autocapitalize: 'characters', autocomplete: 'off', style: 'max-width:140px' });
+      var sInitials = el('input', { type: 'text', maxlength: '4', autocapitalize: 'characters', autocomplete: 'off', style: 'max-width:140px' });
+      var pgTicks = [], sTicks = [];
+      var vzYes = el('input', { type: 'radio', name: 'vz_consent' }), vzNo = el('input', { type: 'radio', name: 'vz_consent' });
+      var studentFull = d.student.first + ' ' + d.student.last;
+      function initialsOk(v) { return /^[A-Za-zÀ-ÿ]{1,4}$/.test(v.value.replace(/[.\s]/g, '')); }
+      if (d.online) {
+        steps.push({ title: 'stepDp', check: function () { return true; },
+          node: el('div', {}, [T('p', 'docNote', { class: 'note' }), renderDoc(d.dpText, studentFull)]) });
+
+        function tick(list, wordKey, source) {
+          var cb = el('input', { type: 'checkbox' }), shown = el('b');
+          cb.addEventListener('change', function () { shown.textContent = cb.checked ? ' ' + source.value.replace(/[.\s]/g, '').toUpperCase() : ''; });
+          list.push(cb);
+          return el('label', { class: 'check', style: 'padding:4px 18px 4px 0;display:inline-flex' }, [cb, el('span', {}, [T('span', wordKey), shown])]);
+        }
+        steps.push({ title: 'stepDpList', check: function () {
+          if (!initialsOk(pgInitials) || !initialsOk(sInitials)) return showErr('errInitials', initialsOk(pgInitials) ? sInitials : pgInitials);
+          var all = function (list) { return list.every(function (c) { return c.checked; }); };
+          return (all(pgTicks) && all(sTicks)) || showErr('errLines');
+        }, node: el('div', {}, [
+          T('p', 'dpListIntro', { class: 'note' }),
+          el('div', { class: 'row' }, [el('label', { class: 'field' }, [T('span', 'pgInitials'), pgInitials]), el('label', { class: 'field' }, [T('span', 'sInitials'), sInitials])]),
+          el('p', { lang: 'en' }, ['Participant Name: ', el('b', { text: studentFull })]),
+          el('p', { lang: 'en', style: 'font-weight:700', text: d.dpText.checklistIntro }),
+          d.dpText.checklist.map(function (line) {
+            return el('div', { style: 'border-top:1px solid var(--line);padding:10px 0' }, [el('p', { lang: 'en', style: 'margin-bottom:4px', text: line }),
+              tick(pgTicks, 'parentWord', pgInitials), tick(sTicks, 'studentWord', sInitials)]);
+          }),
+          el('p', { lang: 'en', style: 'border-top:1px solid var(--line);padding-top:10px', text: d.dpText.checklistClosing })
+        ]) });
+
+        steps.push({ title: 'stepVz', check: function () { return vzYes.checked || vzNo.checked || showErr('errVz', vzYes); },
+          node: el('div', {}, [T('p', 'docNote', { class: 'note' }), renderDoc(d.vzText, studentFull),
+            el('div', { role: 'radiogroup', style: 'margin-top:12px' }, [
+              el('p', { lang: 'en', style: 'font-weight:700;margin-bottom:2px', text: d.vzText.choiceLabel }),
+              T('p', 'vzChoiceHelp', { class: 'muted' }),
+              el('label', { class: 'check' }, [vzYes, T('span', 'vzYes')]),
+              el('label', { class: 'check' }, [vzNo, T('span', 'vzNo')])])]) });
+      }
+
+      steps.push({ title: 'stepParent', pad: parentPad, check: function () { return parentPad.has() || showErr('errParentSig'); },
+        node: el('div', {}, [d.online ? T('p', 'sigAll', { class: 'note' }) : null, parentPad.node]) });
+      steps.push({ title: 'stepStudent', pad: studentPad, check: function () { return studentPad.has() || showErr('errStudentSig'); },
+        node: el('div', {}, [T('p', 'handOver', { class: 'note' }), d.online ? T('p', 'sigStudentAll', { class: 'muted' }) : null, studentPad.node]) });
+
+      var current = 0, sending = false;
+      var bar = el('div', { class: 'progress', 'aria-hidden': 'true' }, steps.map(function () { return el('span'); }));
+      var counter = el('p', { class: 'muted', style: 'margin-bottom:2px' });
+      var heading = el('h1');
+      var back = T('button', 'back', { class: 'btn', type: 'button', onclick: function () { showStep(current - 1); } });
+      var next = el('button', { class: 'btn primary', type: 'button', style: 'flex:1;min-height:54px;font-size:18px', onclick: function () {
+        errBox.className = 'note bad hidden';
+        if (!steps[current].check()) return;
+        if (current < steps.length - 1) showStep(current + 1); else submit();
+      } });
+
+      function showStep(i) {
+        current = i;
+        errBox.className = 'note bad hidden';
+        steps.forEach(function (s, n) { s.node.className = n === i ? '' : 'hidden'; });
+        Array.prototype.forEach.call(bar.children, function (c, n) { c.className = n <= i ? 'on' : ''; });
+        clear(counter); add(counter, [T('span', 'step'), ' ' + (i + 1) + ' ', T('span', 'of'), ' ' + steps.length]);
+        heading.setAttribute('data-i', steps[i].title);
+        back.className = i === 0 ? 'btn hidden' : 'btn';
+        var last = i === steps.length - 1;
+        next.setAttribute('data-i', last ? 'submit' : 'next');
+        next.className = last ? 'btn accent' : 'btn primary';
+        var s = steps[i];
+        if (s.open) s.open();
+        relabel();
+        window.scrollTo(0, 0);
+        // A canvas can only be measured while it is on screen. Size it the first
+        // time its step opens and never again, because resizing would wipe the signature.
+        if (s.pad && !s.sized) { s.sized = true; requestAnimationFrame(s.pad.init); }
+      }
+
+      function submit() {
+        if (sending) return;
+        sending = true; next.disabled = true; back.disabled = true;
+        var wait = el('div', { class: 'note', role: 'status' }, T('span', 'submitting'));
+        form.appendChild(wait); relabel();
+        Promise.all(d.online ? [null, null] : [
+          readUpload(dp.input && dp.input.files[0]), readUpload(vz.input && vz.input.files[0])
+        ]).then(function (files) {
+          var payload = {
+            parentName: name.value.trim(), phone: phone.value.trim(), email: email.value.trim(), agree: true,
+            parentSig: parentPad.data(), studentSig: studentPad.data(), userAgent: navigator.userAgent
+          };
+          if (d.online) {
+            payload.parentInitials = pgInitials.value; payload.studentInitials = sInitials.value;
+            payload.dpParent = pgTicks.map(function (c) { return c.checked; });
+            payload.dpStudent = sTicks.map(function (c) { return c.checked; });
+            payload.vzConsent = vzYes.checked ? 'agree' : vzNo.checked ? 'decline' : '';
+          } else {
+            payload.dp = { claimed: dp.claimed, file: files[0] };
+            payload.vz = { claimed: vz.claimed, file: files[1] };
+          }
+          return call('apiParentSubmit', code, payload);
+        }).then(function (r) {
+          if (r && r.state === 'signed') return viewSigned(r.date);
+          if (r && r.state === 'done') return viewDone(r);
+          // No clear answer: ask the server whether it was saved before telling the parent anything.
+          return call('apiParentLoad', code).then(function (again) {
+            if (again.state === 'signed') viewSigned(again.date, again.canDownload); else throw new Error('unclear');
+          });
+        }).catch(function (e) {
+          sending = false; next.disabled = false; back.disabled = false;
+          if (wait.parentNode) wait.parentNode.removeChild(wait);
+          var msg = String((e && e.message) || '').replace(/^Error:\s*/, '');
+          if (msg === 'file') return showErr('errFile');
+          if (/INVALID_LINK/.test(msg)) return viewInvalid();
+          showErr('errGeneric');
+          // A reason from the server (for example a missing initial) is shown as well.
+          if (/^(Please|Every|A signature)/.test(msg)) errBox.appendChild(el('div', { style: 'margin-top:6px', text: msg }));
+        });
+      }
+
+      var form = el('div', {}, [
+        bar, counter, heading,
+        steps.map(function (s) { return s.node; }),
+        errBox,
+        el('div', { class: 'row', style: 'margin-top:18px' }, [back, next]),
+        el('p', { class: 'muted', style: 'text-align:center;margin-top:22px' }, [T('span', 'footer'), ' ', itLink(), '.'])
+      ]);
+      show(form);
+      showStep(0);
+    }
+
+    function viewDone(r) {
+      var pending = (r.pending || []).map(function (k) { return T('li', k === 'dp' ? 'dpName' : 'vzName'); });
+      show(el('div', {}, [
+        el('div', { class: 'banner ok' }, T('span', 'doneTitle')),
+        T('p', r.documents === 3 ? 'doneMsg3' : 'doneMsg'),
+        r.emailed ? el('p', {}, [T('span', 'doneEmail'), ' ', el('b', { text: r.email }), '.']) : T('p', 'doneNoEmail'),
+        pending.length ? el('div', { class: 'note warn' }, [T('span', 'doneOutside'), el('ul', {}, pending)]) : null,
+        downloadList(r.files)
+      ]));
+    }
+
+    function load() {
+      show(el('div', {}, T('p', 'loading')));
+      // The first time, the page already carries the answer; no second request is needed.
+      var first = BOOT.initial;
+      BOOT.initial = null;
+      (first ? Promise.resolve(first) : call('apiParentLoad', code)).then(function (r) {
+        if (r.lang && !langChosen) lang = r.lang;
+        if (r.state === 'open') { DATA = r; viewForm(); }
+        else if (r.state === 'signed') viewSigned(r.date, r.canDownload);
+        else viewInvalid();
+      }).catch(function () {
+        show(el('div', {}, el('p', { class: 'note bad' }, [T('span', 'errGeneric'), ' ', itLink(), '.'])));
+      });
+    }
+
+    relabel();
+    if (BOOT.mode === 'find') viewFind();
+    else if (!code) viewInvalid();
+    else load();
+  </script>
+</body>
+</html>

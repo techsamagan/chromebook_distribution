@@ -1,0 +1,130 @@
+<script>
+  /* Shared browser helpers. All text is written with textContent, never innerHTML,
+     so names or notes typed by anyone can never run as code. */
+
+  function $(id) { return document.getElementById(id); }
+
+  function el(tag, attrs, kids) {
+    var e = document.createElement(tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (k) {
+        var v = attrs[k];
+        if (v === null || v === undefined || v === false) return;
+        if (k === 'class') e.className = v;
+        else if (k === 'text') e.textContent = v;
+        else if (k === 'value') e.value = v;
+        else if (k === 'checked' || k === 'disabled' || k === 'selected' || k === 'readOnly') e[k] = !!v;
+        else if (k.indexOf('on') === 0) e.addEventListener(k.substring(2), v);
+        else e.setAttribute(k, v === true ? '' : v);
+      });
+    }
+    add(e, kids);
+    return e;
+  }
+
+  function add(parent, kids) {
+    if (kids === null || kids === undefined || kids === false) return parent;
+    if (Array.isArray(kids)) kids.forEach(function (k) { add(parent, k); });
+    else if (kids.nodeType) parent.appendChild(kids);
+    else parent.appendChild(document.createTextNode(String(kids)));
+    return parent;
+  }
+
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); return node; }
+
+  /** Only http(s) links are ever placed in an href. */
+  function safeUrl(u) { return /^https?:\/\//i.test(String(u || '')) ? String(u) : ''; }
+
+  var busyCount = 0;
+  function setBusy(delta) {
+    busyCount = Math.max(0, busyCount + delta);
+    var b = $('busy');
+    if (busyCount && !b) document.body.appendChild(el('div', { id: 'busy' }));
+    if (!busyCount && b) b.parentNode.removeChild(b);
+  }
+
+  /** Calls a server function; returns a Promise. call('apiName', arg1, arg2) */
+  function call(name) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    setBusy(1);
+    return new Promise(function (resolve, reject) {
+      var runner = google.script.run
+        .withSuccessHandler(function (r) { setBusy(-1); resolve(r); })
+        .withFailureHandler(function (e) { setBusy(-1); reject(e instanceof Error ? e : new Error(String((e && e.message) || e))); });
+      runner[name].apply(runner, args);
+    });
+  }
+
+  function errText(e) {
+    return String((e && e.message) || e || 'That did not work. Try again.').replace(/^(Exception|Error|ScriptError):\s*/i, '');
+  }
+
+  function toast(msg, kind) {
+    var box = $('toast') || document.body.appendChild(el('div', { id: 'toast', role: 'status', 'aria-live': 'polite' }));
+    var t = el('div', { class: kind || '', text: msg });
+    box.appendChild(t);
+    setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, kind === 'bad' ? 9000 : 4500);
+  }
+  function fail(e) { toast(errText(e), 'bad'); }
+
+  /** modal('Title', bodyNode, [{label, cls, onClick(close)}]) -> {close, node} */
+  function modal(title, body, buttons, wide) {
+    var overlay = el('div', { class: 'overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': title });
+    function close() { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
+    var row = el('div', { class: 'row end', style: 'margin-top:14px' });
+    (buttons || [{ label: 'Close' }]).forEach(function (b) {
+      row.appendChild(el('button', {
+        class: 'btn ' + (b.cls || ''), type: 'button', text: b.label,
+        onclick: function () { if (b.onClick) b.onClick(close); else close(); }
+      }));
+    });
+    var box = el('div', { class: 'modal' + (wide ? ' wide' : '') }, [el('h2', { text: title }), body, row]);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    var first = box.querySelector('input,select,textarea,button');
+    if (first) first.focus();
+    return { close: close, node: box };
+  }
+
+  /** confirmBox('Replace this Chromebook?', 'What will happen', 'Replace') -> Promise<boolean> */
+  function confirmBox(title, message, okLabel, cls) {
+    return new Promise(function (resolve) {
+      modal(title, el('p', { text: message, style: 'white-space:pre-wrap' }), [
+        { label: 'Cancel', onClick: function (c) { c(); resolve(false); } },
+        { label: okLabel || 'Yes', cls: cls || 'primary', onClick: function (c) { c(); resolve(true); } }
+      ]);
+    });
+  }
+
+  /** Saves text (or base64 data) as a file download. */
+  function download(name, mime, data, isBase64) {
+    var blob;
+    if (isBase64) {
+      var bin = atob(data), bytes = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      blob = new Blob([bytes], { type: mime });
+    } else blob = new Blob(['﻿' + data], { type: mime });
+    var url = URL.createObjectURL(blob);
+    var a = el('a', { href: url, download: name });
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { document.body.removeChild(a); URL.revokeObjectURL(url); }, 2000);
+  }
+
+  function field(label, input, hint) {
+    return el('label', { class: 'field' }, [label, hint ? el('span', { class: 'hint', text: ' ' + hint }) : null, input]);
+  }
+
+  function copyText(text) {
+    function fallback() {
+      var ta = el('textarea', { value: text, style: 'position:fixed;top:0;left:0;opacity:0' });
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); toast('Copied', 'ok'); } catch (e) { window.prompt('Copy this link:', text); }
+      document.body.removeChild(ta);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { toast('Copied', 'ok'); }, fallback);
+    } else fallback();
+  }
+</script>

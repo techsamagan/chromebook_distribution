@@ -1,0 +1,486 @@
+<script>
+  /* Staff app: the deployment screen, Chromebooks, repairs, loaners, reports. */
+
+  /** Search box and result list. onPick receives the trimmed station view of a student. */
+  function studentPicker(onPick, autofocus) {
+    var results = el('div', { 'aria-live': 'polite' });
+    var timer = null, seq = 0;
+    var input = el('input', { type: 'search', class: 'huge', placeholder: 'Student name', 'aria-label': 'Search for a student by name',
+      autocomplete: 'off', oninput: function () {
+        clearTimeout(timer);
+        var q = input.value.trim();
+        if (q.length < 2) { clear(results); return; }
+        timer = setTimeout(function () {
+          var mine = ++seq;
+          call('apiStationSearch', q).then(function (list) {
+            if (mine !== seq) return;
+            clear(results);
+            if (!list.length) return results.appendChild(el('p', { class: 'muted', style: 'margin-top:8px', text: 'No student with that name. Check the spelling.' }));
+            list.forEach(function (s) {
+              results.appendChild(el('button', { class: 'list-btn', type: 'button', onclick: function () { input.value = ''; clear(results); onPick(s); } }, [
+                el('b', { text: s.last + ', ' + s.first }), el('span', { class: 'muted', text: 'Grade ' + s.grade }),
+                el('span', { class: 'spacer' }), el('span', { style: 'font-size:15px' }, statusEl(s.status))
+              ]));
+            });
+          }).catch(fail);
+        }, 300);
+      } });
+    var node = el('div', {}, [input, results]);
+    if (autofocus) setTimeout(function () { input.focus(); }, 50);
+    return { node: node, focus: function () { input.focus(); } };
+  }
+
+  /* ================= Deployment day: one screen, one next step ================= */
+  VIEWS.day = function (root, pre) {
+    var card = el('div', { style: 'margin-top:20px' });
+    var picker = studentPicker(show, !pre);
+    add(root, [el('h1', { text: 'Deployment day' }),
+      el('p', { class: 'muted', text: 'Find the student. The screen shows the next thing to do for that student.' }), picker.node, card]);
+    if (pre && pre.id) refresh(pre.id);
+
+    function refresh(id) { call('apiStationGet', id).then(show).catch(fail); }
+    function big(label, cls, fn) { return el('button', { class: 'btn big ' + cls, type: 'button', text: label, onclick: fn }); }
+    function formLine(label, ok, waiting) {
+      return el('div', {}, [label + ': ', el('span', { class: ok ? 's-ok' : (waiting ? 's-warn' : 's-bad'), text: ok ? 'done' : (waiting ? 'waiting for staff to check' : 'missing') })]);
+    }
+    function received(s, key, label) {
+      return big('I have the signed ' + label + ' on paper', '', function () {
+        confirmBox(label + ' received?', 'Only confirm if you are holding the signed ' + label + ' for ' + s.first + ' ' + s.last + '.', 'Yes, I have it').then(function (ok) {
+          if (ok) call('apiSetOutsideForm', s.id, key, 'Verified by staff').then(function () { refresh(s.id); }).catch(fail);
+        });
+      });
+    }
+
+    function show(s, replacing) {
+      var kids = [
+        el('h1', { text: s.first + ' ' + s.last, style: 'margin-bottom:0' }), el('p', { class: 'muted', text: 'Grade ' + s.grade }),
+        s.step === 'after' && !replacing ? el('div', { class: 'note warn', style: 'font-size:20px', role: 'status' }, statusEl(s.status))
+          : s.ready ? el('div', { class: 'banner ok', role: 'status', text: s.step === 'done' && !replacing ? 'FINISHED' : 'READY' })
+            : el('div', { class: 'banner bad', role: 'alert' }, ['NOT READY', el('small', { text: s.missing.join('. ') })]),
+        el('div', { style: 'margin-bottom:16px' }, [
+          formLine('Chromebook Checkout Form', s.signed), formLine('Digital Promise agreement', s.dpOk, s.dpWaiting),
+          s.vzRequired ? formLine('Verizon release', s.vzOk, s.vzWaiting) : null
+        ])
+      ];
+      var step = replacing ? 'assign' : s.step;
+
+      if (step === 'sign') {
+        if (s.canSignNow) kids.push(big('Sign now on this tablet', 'accent', function () {
+          call('apiStationSignLink', s.id).then(function (r) {
+            var m = modal('Sign now', el('div', {}, [
+              el('p', { text: 'Open the form for ' + s.first + ' ' + s.last + ', then hand the tablet to the parent.' }),
+              el('a', { class: 'btn big accent', href: safeUrl(r.link), target: '_blank', rel: 'noopener', text: 'Open the signing form',
+                onclick: function () { setTimeout(function () { m.close(); }, 300); } }),
+              el('p', { class: 'muted', text: 'When the parent has finished, come back to this tab and press Check again.' })
+            ]), [{ label: 'Cancel' }]);
+          }).catch(fail);
+        }));
+        else kids.push(el('div', { class: 'note bad', text: 'This student\'s link has been switched off. Send the family to IT staff.' }));
+      }
+      if (step === 'sign' || step === 'forms') {
+        if (s.canVerifyForms && !s.dpOk) kids.push(received(s, 'dp', 'Digital Promise form'));
+        if (s.canVerifyForms && s.vzRequired && !s.vzOk) kids.push(received(s, 'vz', 'Verizon release'));
+        if (step === 'forms' && !s.canVerifyForms) kids.push(el('div', { class: 'note warn', text: 'Send this family to IT staff to hand in the missing form.' }));
+        kids.push(el('div', { class: 'note bad', text: 'Do not give this student a Chromebook yet.' }));
+      }
+
+      if (step === 'verify') kids.push(big('Forms are complete. Continue', 'ok', function () {
+        call('apiStation1Verify', s.id).then(show).catch(fail);
+      }));
+
+      if (step === 'assign') {
+        var tag = el('input', { type: 'text', class: 'huge', placeholder: 'Scan or type the asset tag', 'aria-label': 'Asset tag', autocomplete: 'off',
+          autocapitalize: 'characters', onkeydown: function (ev) { if (ev.key === 'Enter') { ev.preventDefault(); assign(false); } } });
+        var explained = el('input', { type: 'checkbox' });
+        var assign = function (confirmed) {
+          var v = tag.value.trim();
+          if (!v) return toast('Scan or type the asset tag first.', 'bad');
+          if (!explained.checked) return toast('Explain the Chromebook Policy and the repair costs, then tick the box.', 'bad');
+          var ask = confirmed ? Promise.resolve(true)
+            : confirmBox('Give Chromebook ' + v + ' to ' + s.first + ' ' + s.last + '?', 'Grade ' + s.grade + '. Check the name with the student before you confirm.', 'Yes, assign it', 'ok');
+          ask.then(function (ok) {
+            if (!ok) return;
+            call('apiAssignDevice', s.id, v, confirmed).then(function (r) {
+              if (r.needsConfirm) {
+                return confirmBox('Replace this student\'s Chromebook?', r.message, 'Replace', 'accent').then(function (yes) { if (yes) assign(true); });
+              }
+              toast(r.already ? 'Chromebook ' + r.tag + ' was already assigned to this student.' : 'Chromebook ' + r.tag + ' assigned.', 'ok');
+              if (r.pdfWarning) toast(r.pdfWarning, 'bad');
+              show(r.student);
+            }).catch(function (e) { fail(e); tag.select(); });
+          });
+        };
+        if (replacing && s.tag) kids.push(el('div', { class: 'note warn', text: 'This student has Chromebook ' + s.tag + '. Scan the new one to replace it.' }));
+        kids.push(el('label', { class: 'check' }, [explained, 'I explained the Chromebook Policy and the repair costs to the family']));
+        kids.push(tag);
+        if ('BarcodeDetector' in window && navigator.mediaDevices) {
+          kids.push(el('p', { style: 'margin:8px 0 0' }, button('Scan with the camera', function () {
+            scanBarcode().then(function (v) { if (v) { tag.value = v; tag.focus(); } });
+          }, 'small')));
+        }
+        kids.push(el('div', { style: 'margin-top:12px' }, big(replacing && s.tag ? 'Replace Chromebook' : 'Assign Chromebook', 'ok', function () { assign(false); })));
+        setTimeout(function () { tag.focus(); }, 60);
+      }
+
+      if (step === 'check') {
+        kids.push(el('p', { style: 'font-size:20px' }, ['Chromebook ', el('b', { text: s.tag }), '. Ask the student to sign in.']));
+        kids.push(big('The student signed in and it works', 'ok', function () {
+          call('apiVerifyWorking', s.id, true, '').then(show).catch(fail);
+        }));
+        kids.push(big('There is a problem', 'danger', function () {
+          promptText('What is the problem with ' + s.tag + '?', 'Describe it for IT, for example: will not turn on, cannot sign in', true).then(function (note) {
+            if (!note) return;
+            call('apiVerifyWorking', s.id, false, note).then(function () { toast('IT has been told. Send the student to the IT table.', 'ok'); }).catch(fail);
+          });
+        }));
+      }
+
+      if (step === 'after') {
+        kids.push(el('p', { text: 'This is not a deployment day case. Send the student to the IT table.' }));
+        if (ROLE !== 'Station Helper' && !s.tag && s.ready) kids.push(el('p', {}, button('Give this student a Chromebook again', function () { show(s, true); }, 'small')));
+      }
+
+      if (step === 'done') {
+        kids.push(el('div', { class: 'note ok', text: s.first + ' has Chromebook ' + s.tag + ' and it works. Nothing more to do.' }));
+        if (ROLE !== 'Station Helper') kids.push(el('p', {}, button('Replace this Chromebook', function () { show(s, true); }, 'small')));
+      }
+
+      kids.push(el('div', { class: 'row', style: 'margin-top:14px' }, [
+        button('Check again', function () { refresh(s.id); }), el('span', { class: 'spacer' }),
+        button('Next student', function () { clear(card); picker.focus(); }, 'primary')
+      ]));
+      clear(card).appendChild(el('div', { class: 'box' }, kids));
+    }
+  };
+
+  /** Camera scanning on phones and tablets that support it. Resolves to the code, or ''. */
+  function scanBarcode() {
+    return new Promise(function (resolve) {
+      var video = el('video', { playsinline: true, muted: true, style: 'width:100%;background:#000' });
+      var stream = null, timer = null, finished = false;
+      function stop(value) {
+        if (finished) return;
+        finished = true;
+        clearInterval(timer);
+        if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+        m.close();
+        resolve(value || '');
+      }
+      var m = modal('Point the camera at the asset tag', video, [{ label: 'Cancel', onClick: function () { stop(''); } }]);
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }).then(function (s) {
+        stream = s; video.srcObject = s; video.play();
+        var detector = new BarcodeDetector();
+        timer = setInterval(function () {
+          detector.detect(video).then(function (codes) { if (codes.length) stop(String(codes[0].rawValue).trim()); }).catch(function () {});
+        }, 300);
+      }).catch(function () { stop(''); toast('The camera cannot be used here. Type the tag or use the USB scanner.', 'bad'); });
+    });
+  }
+
+  /* ================= Chromebooks and repairs ================= */
+  VIEWS.gear = function (root, tab) {
+    tab = tab || 'devices';
+    var tabs = [['devices', 'Chromebooks'], ['checkouts', 'Check-outs'], ['repairs', 'Repairs and lost reports'], ['loaners', 'Loaners']];
+    add(root, [el('h1', { text: 'Chromebooks and repairs' }),
+      el('nav', { class: 'sub', 'aria-label': 'Sections' }, tabs.map(function (t) {
+        return el('button', { type: 'button', class: t[0] === tab ? 'on' : '', text: t[1], onclick: function () { go('gear', t[0]); } });
+      }))]);
+    var body = root.appendChild(el('div'));
+    if (tab === 'devices') devicesTab(body);
+    if (tab === 'checkouts') checkoutsTab(body);
+    if (tab === 'repairs') repairsTab(body);
+    if (tab === 'loaners') loanersTab(body);
+  };
+
+  function devicesTab(root) {
+    live(root, 'apiListDevices', [], function (list) {
+      var body = el('div'), count = el('p', { class: 'muted' });
+      var filter = { q: '', status: '' };
+      var q = el('input', { type: 'search', placeholder: 'Asset tag, serial number or student ID', 'aria-label': 'Search Chromebooks', oninput: function () { filter.q = q.value.toLowerCase(); draw(); } });
+      var st = el('select', { 'aria-label': 'Status', onchange: function () { filter.status = st.value; draw(); } },
+        [el('option', { value: '', text: 'Any status' })].concat(B.deviceStatuses.map(function (s) { return el('option', { value: s, text: s }); })));
+      var counts = {};
+      list.forEach(function (d) { counts[d.status] = (counts[d.status] || 0) + 1; });
+      function draw() {
+        var rows = list.filter(function (d) {
+          if (filter.status && d.status !== filter.status) return false;
+          return !filter.q || (d.asset_tag + ' ' + d.serial_number + ' ' + d.assigned_student).toLowerCase().indexOf(filter.q) >= 0;
+        });
+        count.textContent = plural(rows.length, 'Chromebook') + (rows.length > 300 ? '. Showing the first 300.' : '') + (isAdmin() ? ' Click a row to edit it.' : '');
+        clear(body).appendChild(table(['Asset tag', 'Serial number', 'Status', 'Student ID', 'Since', 'Notes'], rows.slice(0, 300).map(function (d) {
+          return tr([el('b', { text: d.asset_tag }), d.serial_number, d.status, d.assigned_student, d.date_assigned.substring(0, 10), d.notes],
+            isAdmin() ? function () { editDevice(d); } : null);
+        })));
+      }
+      var summary = B.deviceStatuses.filter(function (s) { return counts[s]; }).map(function (s) { return counts[s] + ' ' + s.toLowerCase(); }).join(', ');
+      add(root, [
+        el('p', { text: list.length ? plural(list.length, 'Chromebook') + ': ' + summary + '.' : 'No Chromebooks yet.' }),
+        el('div', { class: 'row', style: 'margin-bottom:16px' }, [
+          isAdmin() ? button('Add one Chromebook', function () { editDevice(null); }) : null,
+          isAdmin() ? button('Import a list', function () { go('import'); }) : null,
+          isAdmin() ? button('Export for Asset Tiger', assetTigerExport) : null,
+          button('Inventory report (spreadsheet)', function () {
+            call('apiInventoryReport').then(function (r) { download('Chromebook_Inventory_' + today() + '.csv', 'text/csv', r.csv); }).catch(fail);
+          }),
+          button('Inventory report (PDF)', function () {
+            call('apiInventoryPdf').then(function (f) { download(f.name, f.mime, f.base64, true); }).catch(fail);
+          })
+        ]),
+        el('div', { class: 'grid' }, [q, st]), count, body
+      ]);
+      draw();
+    });
+  }
+
+  /* ---------- Check-outs: who got which Chromebook, from whom, and when ---------- */
+  function checkoutsTab(root) {
+    live(root, 'apiListCheckouts', [], function (list) {
+      var body = el('div'), count = el('p', { class: 'muted' });
+      var filter = { q: '', by: '' };
+      var people = {};
+      list.forEach(function (c) { people[c.by] = (people[c.by] || 0) + 1; });
+      var names = Object.keys(people).sort();
+      var q = el('input', { type: 'search', placeholder: 'Student, student ID or asset tag', 'aria-label': 'Search check-outs', oninput: function () { filter.q = q.value.toLowerCase(); draw(); } });
+      var by = el('select', { 'aria-label': 'Checked out by', onchange: function () { filter.by = by.value; draw(); } },
+        [el('option', { value: '', text: 'Checked out by anyone' })].concat(names.map(function (n) { return el('option', { value: n, text: n + ' (' + people[n] + ')' }); })));
+      function draw() {
+        var rows = list.filter(function (c) {
+          if (filter.by && c.by !== filter.by) return false;
+          return !filter.q || (c.student + ' ' + c.studentId + ' ' + c.tag).toLowerCase().indexOf(filter.q) >= 0;
+        });
+        count.textContent = plural(rows.length, 'check-out') + (rows.length > 300 ? '. Showing the newest 300; the downloads have all of them.' : '');
+        clear(body).appendChild(rows.length ? table(['Date and time', 'Student', 'Grade', 'Asset tag', 'Serial number', 'Checked out by', 'Now'], rows.slice(0, 300).map(function (c) {
+          var state = c.returned ? el('span', { class: 'muted', text: 'Returned ' + c.returned.substring(0, 10) })
+            : c.kind === 'Loaner' ? el('span', { class: 's-warn', text: 'Loaner, still out' })
+              : c.working ? el('span', { class: 's-ok', text: 'With the student' }) : el('span', { class: 's-warn', text: 'With the student, not checked yet' });
+          return tr([c.at, [el('b', { text: c.student }), el('div', { class: 'muted', text: 'ID ' + c.studentId })], c.grade, c.tag, c.serial, c.by, state],
+            function () { openStudent(c.studentId); });
+        })) : el('p', { class: 'muted', text: list.length ? 'Nothing matches.' : 'No Chromebook has been checked out yet.' }));
+      }
+      add(root, [
+        el('p', { text: 'Every Chromebook handed to a student: which one, when, and who handed it over. The name comes from the account the staff member was signed in with.' }),
+        names.length ? el('p', { class: 'muted', text: 'By person: ' + names.map(function (n) { return n + ' ' + people[n]; }).join(', ') + '.' }) : null,
+        el('div', { class: 'row', style: 'margin-bottom:16px' }, [
+          isAdmin() ? button('Save as a Google Sheet', function () {
+            call('apiCheckoutsToSheet').then(function (r) {
+              modal('Google Sheet saved', el('div', {}, [
+                el('p', { text: '"' + r.name + '" with ' + plural(r.rows, 'check-out') + ' was saved in ' + r.where + '.' }),
+                el('p', {}, el('a', { class: 'btn primary', href: safeUrl(r.url), target: '_blank', rel: 'noopener', text: 'Open the Google Sheet' })),
+                el('p', { class: 'muted', text: 'It is a copy made at this moment. Later check-outs are not added to it; save a new one when you need an up-to-date list.' })
+              ]));
+            }).catch(fail);
+          }, 'primary') : null,
+          button('Download as a spreadsheet file', function () {
+            call('apiCheckoutsCsv').then(function (csv) { download('Chromebook_Checkouts_' + today() + '.csv', 'text/csv', csv); }).catch(fail);
+          })
+        ]),
+        el('div', { class: 'grid' }, [q, by]), count, body
+      ]);
+      draw();
+    });
+  }
+
+  function editDevice(d) {
+    var isNew = !d;
+    d = d || { status: 'In stock' };
+    var f = {};
+    function inp(key, label) { f[key] = el('input', { type: 'text', value: d[key] || '', readOnly: key === 'asset_tag' && !isNew, maxlength: '60' }); return field(label, f[key]); }
+    f.status = el('select', {}, B.deviceStatuses.map(function (s) { return el('option', { value: s, text: s, selected: s === d.status }); }));
+    f.notes = el('textarea', { value: d.notes || '', maxlength: '300' });
+    var body = el('div', {}, [
+      el('div', { class: 'grid' }, [inp('asset_tag', 'Asset tag'), inp('serial_number', 'Serial number'), inp('model', 'Model'), field('Status', f.status),
+        inp('imei', 'IMEI'), inp('mac', 'MAC'), inp('mdn', 'MDN'), inp('iccid', 'ICCID')]),
+      field('Notes', f.notes),
+      el('p', { class: 'muted', text: d.assigned_student ? 'With student ID ' + d.assigned_student + ' since ' + d.date_assigned + '. To take it back, open the student and choose Chromebook returned.'
+        : 'Set the status to Loaner to add this Chromebook to the loaner pool.' })
+    ]);
+    modal(isNew ? 'Add a Chromebook' : 'Chromebook ' + d.asset_tag, body, [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: function (close) {
+      var data = {};
+      Object.keys(f).forEach(function (k) { data[k] = f[k].value.trim(); });
+      call('apiSaveDevice', data, isNew).then(function () { close(); toast('Saved', 'ok'); go('gear', 'devices'); }).catch(fail);
+    } }], true);
+  }
+
+  function assetTigerExport() {
+    call('apiAssetTigerExport').then(function (r) {
+      if (!r.count) return toast('Nothing new to export. Every check-out is already in Asset Tiger.');
+      download('AssetTiger_Checkouts_' + today() + '.csv', 'text/csv', r.csv);
+      modal('Asset Tiger export', el('div', {}, [
+        el('p', { text: plural(r.count, 'check-out was', 'check-outs were') + ' downloaded as a spreadsheet file.' }),
+        el('p', { text: 'Import the file into Asset Tiger. Once Asset Tiger shows them, press the button below so they are not exported twice.' }),
+        el('p', { class: 'muted', text: 'If you close this without pressing it, the same check-outs are in the next export.' })
+      ]), [{ label: 'Not yet' }, { label: 'They are in Asset Tiger now', cls: 'ok', onClick: function (close) {
+        call('apiMarkAssetTiger', r.ids).then(function (x) { close(); toast(plural(x.marked, 'check-out') + ' marked', 'ok'); go('home'); }).catch(fail);
+      } }]);
+    }).catch(fail);
+  }
+
+  /* ---------- Repairs ---------- */
+  function newRepair(kind, student, done) {
+    var sid = student && (student.id || student.student_id);
+    var chosen = el('p', {}, sid ? ['Student: ', el('b', { text: (student.first || student.first_name) + ' ' + (student.last || student.last_name) })] : null);
+    var picker = sid ? null : studentPicker(function (s) {
+      sid = s.id;
+      clear(chosen); add(chosen, ['Student: ', el('b', { text: s.first + ' ' + s.last }), s.tag ? ', Chromebook ' + s.tag : ', no Chromebook assigned']);
+    }, true);
+    var type = el('select', {}, kind === 'repair' ? [el('option', { value: 'repair', text: 'Repair' })]
+      : [el('option', { value: 'lost', text: 'Lost' }), el('option', { value: 'stolen', text: 'Stolen' })]);
+    var desc = el('textarea', { maxlength: '1000' });
+    var body = el('div', {}, [picker ? picker.node : null, chosen, kind === 'repair' ? null : field('Lost or stolen', type),
+      field(kind === 'repair' ? 'What is wrong with it' : 'When and where it was last seen', desc),
+      kind === 'repair' ? null : el('div', { class: 'note warn', text: 'Saving marks the Chromebook as Lost and emails IT.' })]);
+    modal(kind === 'repair' ? 'New repair' : 'Lost or stolen Chromebook', body, [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: function (close) {
+      if (!sid) return toast('Choose the student first.', 'bad');
+      call('apiCreateRepair', { studentId: sid, type: type.value, description: desc.value }).then(function (r) {
+        close(); toast('Saved as ' + r.repair_id, 'ok');
+        if (done) done(); else go('gear', 'repairs');
+      }).catch(fail);
+    } }]);
+  }
+
+  function editRepair(r) {
+    var isRepair = r.type === 'repair';
+    var work = el('input', { type: 'text', value: r.repair || '', maxlength: '500' });
+    var cost = el('input', { type: 'text', inputmode: 'decimal', value: r.cost || '' });
+    // Prices of this Chromebook's model (one column per model in Settings); the first column if the model is not listed.
+    var col = Math.max(0, (B.models || []).indexOf(r.model));
+    function priceOf(c) { var v = (c.costs || [])[col]; return Number(v === undefined || v === '' ? c.cost : v); }
+    var part = el('select', { onchange: function () {
+      var c = B.costs.filter(function (x) { return x.name === part.value; })[0];
+      if (c) cost.value = priceOf(c).toFixed(2);
+    } }, [el('option', { value: '', text: 'None' })].concat(B.costs.map(function (c) {
+      return el('option', { value: c.name, text: c.name + ' ($' + priceOf(c).toFixed(2) + ')', selected: c.name === r.replacement });
+    })));
+    var status = el('select', {}, B.repairStatuses.map(function (s) { return el('option', { value: s, text: s, selected: s === r.status }); }));
+    var paid = el('input', { type: 'checkbox', checked: r.paid === 'Y' });
+    var school = el('input', { type: 'text', inputmode: 'decimal', value: r.school_share || '' });
+    var studentShare = el('input', { type: 'text', inputmode: 'decimal', value: r.student_share || '' });
+    var rule = isRepair ? (B.shares[Math.min(parseInt(r.repair_number, 10) || 1, B.shares.length) - 1] || {}) : null;
+    var body = el('div', {}, [
+      el('dl', { class: 'kv', style: 'margin-bottom:14px' }, [
+        el('dt', { text: 'Student' }), el('dd', { text: r.student_name || r.student_id }),
+        el('dt', { text: 'Chromebook' }), el('dd', { text: r.asset_tag + ', serial ' + r.serial_number }),
+        el('dt', { text: 'MDN, IMEI' }), el('dd', { text: (r.mdn || 'none') + ', ' + (r.imei || 'none') }),
+        el('dt', { text: 'ICCID, MAC' }), el('dd', { text: (r.iccid || 'none') + ', ' + (r.mac || 'none') }),
+        el('dt', { text: 'Reported' }), el('dd', { text: r.opened_date + ' by ' + r.reported_by }),
+        el('dt', { text: 'Problem' }), el('dd', { text: r.description })
+      ]),
+      isRepair ? el('div', { class: 'note', text: 'This is repair number ' + r.repair_number + ' for this student. The school pays ' + rule.school + '% and the student pays ' + rule.student + '%. The amounts are worked out when you save.' })
+        : el('div', { class: 'note warn', text: 'The cost sharing table only covers repairs. For a lost or stolen Chromebook, type in the amounts the school decides.' }),
+      el('div', { class: 'grid' }, [field('Work done', work), field('Part replaced', part), field('Cost in dollars', cost), field('Status', status)]),
+      isRepair ? el('p', {}, ['School pays ', el('b', { text: r.school_share ? '$' + r.school_share : 'not set' }), ', student pays ', el('b', { text: r.student_share ? '$' + r.student_share : 'not set' }), '.'])
+        : el('div', { class: 'grid' }, [field('School pays, in dollars', school), field('Student pays, in dollars', studentShare)]),
+      el('label', { class: 'check' }, [paid, 'The student\'s share has been paid in full'])
+    ]);
+    modal((isRepair ? 'Repair ' : 'Lost or stolen report ') + r.repair_id, body, [{ label: 'Cancel' }, { label: 'Save', cls: 'primary', onClick: function (close) {
+      var data = { repair: work.value, replacement: part.value, cost: cost.value, status: status.value, paid: paid.checked };
+      if (!isRepair) { data.school_share = school.value; data.student_share = studentShare.value; }
+      call('apiUpdateRepair', r.repair_id, data).then(function (u) {
+        close();
+        toast('Saved.' + (isRepair && u.cost ? ' School pays $' + u.school_share + ', student pays $' + u.student_share + '.' : ''), 'ok');
+        go('gear', 'repairs');
+      }).catch(fail);
+    } }], true);
+  }
+
+  function repairsTab(root) {
+    live(root, 'apiListRepairs', [], function (repairs) {
+      var onlyOpen = true, body = el('div');
+      function draw() {
+        var rows = repairs.filter(function (r) { return !onlyOpen || (r.status !== 'Closed' && r.status !== 'Cancelled'); });
+        clear(body).appendChild(rows.length ? table(['Opened', 'Student', 'Asset tag', 'Type', 'Status', 'Cost', 'Student pays', 'Paid'], rows.map(function (r) {
+          return tr([r.opened_date.substring(0, 10), r.student_name, r.asset_tag, r.type + (r.repair_number ? ' ' + r.repair_number : ''),
+            el('span', { class: r.status === 'Open' ? 's-warn' : '', text: r.status }),
+            r.cost ? '$' + r.cost : '', r.student_share ? '$' + r.student_share : '', r.paid === 'Y' ? 'Yes' : ''], function () { editRepair(r); });
+        })) : el('p', { class: 'muted', text: onlyOpen ? 'No open repairs.' : 'No repairs yet.' }));
+      }
+      var toggle = el('input', { type: 'checkbox', checked: true, onchange: function () { onlyOpen = toggle.checked; draw(); } });
+      var base = String(B.staffUrl || '');
+      add(root, [
+        el('div', { class: 'row', style: 'margin-bottom:12px' }, [
+          button('New repair', function () { newRepair('repair', null); }, 'primary'),
+          button('Lost or stolen Chromebook', function () { newRepair('lost', null); }, 'danger'),
+          el('span', { class: 'spacer' }), el('label', { class: 'check', style: 'padding:0' }, [toggle, 'Open ones only'])]),
+        body,
+        base ? section('Forms students can fill in themselves', [
+          el('p', { class: 'muted', text: 'A student signed in to a school account can send these. Share or bookmark the links.' }),
+          el('p', {}, ['Repair request: ', el('a', { href: safeUrl(base + '?page=repair'), target: '_blank', rel: 'noopener', text: base + '?page=repair' })]),
+          el('p', {}, ['Lost or stolen report: ', el('a', { href: safeUrl(base + '?page=lost'), target: '_blank', rel: 'noopener', text: base + '?page=lost' })])]) : null
+      ]);
+      draw();
+    });
+  }
+
+  /* ---------- Loaners ---------- */
+  function loanersTab(root) {
+    live(root, 'apiListLoaners', [], function (l) {
+      var who = null, label = el('p', { class: 'muted', text: 'No student chosen yet.' });
+      var picker = studentPicker(function (s) { who = s; label.className = ''; label.textContent = 'Loaner for ' + s.first + ' ' + s.last + ', grade ' + s.grade + '.'; });
+      var tag = el('input', { type: 'text', placeholder: 'Scan or type the loaner asset tag', 'aria-label': 'Loaner asset tag', autocomplete: 'off' });
+      add(root, [
+        el('p', { text: 'A loaner is due back at the end of the same day.' }),
+        l.out.length ? table(['Student', 'Asset tag', 'Given out', 'Due back', ''], l.out.map(function (c) {
+          return tr([c.student_name, c.asset_tag, c.checked_out_at, el('span', { class: c.overdue ? 's-bad' : '', text: c.due + (c.overdue ? ' (late)' : '') }),
+            button('It is back', function () {
+              call('apiReturnLoaner', c.checkout_id).then(function () { toast('Loaner returned', 'ok'); go('gear', 'loaners'); }).catch(fail);
+            }, 'small')]);
+        })) : el('p', { class: 'muted', text: 'No loaners are out.' }),
+        section('Give out a loaner', [
+          el('p', { class: 'muted', text: l.available.length ? 'Loaners on the shelf: ' + l.available.join(', ') + '.' : 'No Chromebook has the status Loaner. Set one under Chromebooks.' }),
+          picker.node, label, tag,
+          el('div', { class: 'row', style: 'margin-top:10px' }, button('Give out this loaner', function () {
+            if (!who) return toast('Choose the student first.', 'bad');
+            call('apiIssueLoaner', who.id, tag.value).then(function () { toast('Loaner given out', 'ok'); go('gear', 'loaners'); }).catch(fail);
+          }, 'primary'))])
+      ]);
+    });
+  }
+
+  /* ================= Reports ================= */
+  VIEWS.reports = function (root) {
+    Promise.all([call('apiReports'), call('apiOverview')]).then(function (res) {
+      var r = res[0], o = res[1];
+      var c = r.claims;
+      var heads = ['Student', 'ID', 'Grade', 'What is missing'];
+      if (r.withContact) heads.push('Parent contact');
+      function missingTable() {
+        return table(heads, r.missing.map(function (m) {
+          var cells = [m.last + ', ' + m.first, m.id, m.grade, m.missing.join('; ')];
+          if (r.withContact) cells.push(m.contact);
+          return tr(cells);
+        }), 'b');
+      }
+      add(root, [
+        el('p', {}, button('Back to Home', function () { go('home'); }, 'small')),
+        el('h1', { text: 'Reports' }),
+        section('Students who are not ready for a Chromebook (' + r.missing.length + ')', [
+          r.missing.length ? el('div', { class: 'row', style: 'margin-bottom:10px' }, [
+            button('Print this list', function () {
+              printNode(el('div', { style: 'padding:16px' }, [el('h2', { text: 'Students not ready for a Chromebook, ' + new Date().toLocaleDateString() }), missingTable()]));
+            }),
+            button('Download as a spreadsheet', function () {
+              call('apiMissingFormsCsv').then(function (csv) { download('Not_Ready_' + today() + '.csv', 'text/csv', csv); }).catch(fail);
+            })]) : null,
+          r.missing.length ? missingTable() : el('p', { class: 's-ok', text: 'Every student is ready.' })]),
+        section('Progress by grade', table(['Grade', 'Students', 'Link sent', 'Signed', 'Ready', 'Has a Chromebook', 'Checked working'],
+          o.grades.map(function (g) { return tr([g.grade, g.total, g.invited, g.signed, g.formsDone, g.assigned, g.working]); })
+            .concat([tr(['All', o.totals.total, o.totals.invited, o.totals.signed, o.totals.formsDone, o.totals.assigned, o.totals.working].map(function (v) { return el('b', { text: v }); }))]))),
+        section('Claims rate', [
+          el('p', { text: c.rate + '% over the last two years: ' + plural(c.incidents, 'repair, lost or stolen record') + ' for ' + plural(c.fleet, 'Chromebook') + '.' }),
+          c.level === 'over' ? el('div', { class: 'note bad', role: 'alert', text: 'This is at or above the ' + c.threshold + '% VILS limit.' })
+            : c.level === 'warn' ? el('div', { class: 'note warn', role: 'alert', text: 'This is getting close to the ' + c.threshold + '% VILS limit.' })
+              : el('p', { class: 'muted', text: 'The VILS limit is ' + c.threshold + '%.' })]),
+        section('Chromebooks not returned, records on hold (' + r.notReturned.length + ')',
+          r.notReturned.length ? table(['Student', 'ID', 'Grade', 'Asset tag', 'Since'], r.notReturned.map(function (n) {
+            return tr([n.name, n.id, n.grade, n.tag, n.since], function () { openStudent(n.id); });
+          })) : el('p', { class: 'muted', text: 'None.' })),
+        section('Loaners that are late (' + r.overdueLoaners.length + ')',
+          r.overdueLoaners.length ? table(['Student', 'Grade', 'Asset tag', 'Was due'], r.overdueLoaners.map(function (o) { return tr([o.student, o.grade, o.tag, o.due]); }))
+            : el('p', { class: 'muted', text: 'None.' })),
+        section('Student shares not paid (' + r.unpaid.length + ')',
+          r.unpaid.length ? table(['Record', 'Student', 'Asset tag', 'Type', 'Owes'], r.unpaid.map(function (u) { return tr([u.id, u.student, u.tag, u.type, '$' + u.owed]); }))
+            : el('p', { class: 'muted', text: 'None.' }))
+      ]);
+    }).catch(fail);
+  };
+</script>

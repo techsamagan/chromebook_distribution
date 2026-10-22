@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <?!= include_('Styles') ?>
+</head>
+<body class="parent">
+  <div class="school"><div class="name" id="schoolName"></div></div>
+  <main id="app"></main>
+  <script>var BOOT = <?!= boot ?>;</script>
+  <?!= include_('ClientCore') ?>
+  <script>
+    /* Student Chromebook Repair Request / Lost-Stolen Report (school account required). */
+    $('schoolName').textContent = BOOT.school;
+    var isLost = BOOT.mode === 'lost';
+    var app = $('app');
+
+    function form() {
+      var id = el('input', { type: 'text', autocomplete: 'off', maxlength: '30' });
+      var last = el('input', { type: 'text', autocomplete: 'family-name', maxlength: '60' });
+      var type = el('select', {}, [el('option', { value: 'lost', text: 'Lost' }), el('option', { value: 'stolen', text: 'Stolen' })]);
+      var desc = el('textarea', { maxlength: '1000' });
+      var btn = el('button', { class: 'btn accent big', type: 'submit', text: isLost ? 'Send report' : 'Send repair request' });
+      clear(app).appendChild(el('form', { onsubmit: function (ev) {
+        ev.preventDefault();
+        if (!id.value.trim() || !last.value.trim() || desc.value.trim().length < 3) return toast('Please fill in every box.', 'bad');
+        btn.disabled = true;
+        call('apiStudentReport', {
+          studentId: id.value.trim(), lastName: last.value.trim(), type: isLost ? type.value : 'repair', description: desc.value.trim()
+        }).then(function (r) {
+          clear(app).appendChild(el('div', {}, [
+            el('div', { class: 'banner ok', text: 'Sent' }),
+            el('p', { text: 'IT has your ' + (isLost ? 'report' : 'repair request') + '. Reference: ' + r.id }),
+            el('p', { text: isLost ? 'Please also tell the front office today.' : 'Bring your Chromebook and charger to the IT office.' })
+          ]));
+        }).catch(function (e) { btn.disabled = false; fail(e); });
+      } }, [
+        el('h1', { text: isLost ? 'Chromebook Lost/Stolen Report' : 'Chromebook Repair Request' }),
+        field('Student ID', id), field('Student last name', last),
+        isLost ? field('What happened?', type) : null,
+        field(isLost ? 'When and where did you last have it?' : 'What is wrong with the Chromebook?', desc),
+        btn,
+        el('p', { class: 'muted', style: 'margin-top:12px' }, ['Questions: ', el('a', { href: 'mailto:' + BOOT.itEmail, text: BOOT.itEmail })])
+      ]));
+    }
+    form();
+  </script>
+</body>
+</html>

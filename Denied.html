@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <?!= include_('Styles') ?>
+</head>
+<body class="parent">
+  <div class="school"><div class="name" id="schoolName"></div></div>
+  <main id="app"></main>
+  <script>var BOOT = <?!= boot ?>;</script>
+  <?!= include_('ClientCore') ?>
+  <script>
+    $('schoolName').textContent = BOOT.school;
+    var it = el('a', { href: 'mailto:' + BOOT.itEmail, text: BOOT.itEmail });
+    if (BOOT.reason === 'school') {
+      add($('app'), el('div', {}, [
+        el('h1', { text: 'School account needed' }),
+        el('p', { text: 'Please sign in to Google with your school account, then open this page again.' })
+      ]));
+    } else {
+      add($('app'), el('div', {}, [
+        el('h1', { text: 'Chromebook Program' }),
+        el('p', {}, ['Parents and guardians / Padres y tutores: please use the personal link from the school\'s email. ',
+          'Por favor use el enlace personal del correo de la escuela.']),
+        el('p', {}, ['Need help? / ¿Necesita ayuda? ', it]),
+        el('hr'),
+        el('p', { class: 'muted', text: BOOT.signedIn
+          ? 'Staff: your account is not on the staff list for this app, or it has been switched off. Ask the IT Manager for access.'
+          : 'Staff: sign in with your school Google account and use the staff link.' })
+      ]));
+    }
+  </script>
+</body>
+</html>

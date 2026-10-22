@@ -1,0 +1,7 @@
+# Only the Apps Script source (.gs, .html, appsscript.json) is uploaded.
+tests/**
+docs/**
+samples/**
+README.md
+node_modules/**
+templates/**

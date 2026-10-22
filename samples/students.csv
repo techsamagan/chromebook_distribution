@@ -1,0 +1,11 @@
+student_id,student_first_name,student_last_name,grade,parent1_name,parent1_email,parent1_phone,parent2_name,parent2_email,parent2_phone,preferred_language,date_of_birth
+900001,Ava,Martinez,5,Elena Martinez,elena.martinez@example.com,505-555-0101,,,,Spanish,2015-03-14
+900002,Liam,O'Connor,5,Sean O'Connor,sean.oconnor@example.com,505-555-0102,Maeve O'Connor,maeve.oconnor@example.com,505-555-0103,English,2015-07-02
+900003,Noah,Begay,6,Tina Begay,tina.begay@example.com,505-555-0104,,,,English,2014-11-23
+900004,Sofia,Garcia-Lopez,6,Maria Lopez,maria.lopez@example.com,505-555-0105,Jorge Garcia,jorge.garcia@example.com,,Spanish,2014-01-30
+900005,Ethan,Nguyen,7,Linh Nguyen,linh.nguyen@example.com,505-555-0106,,,,English,2013-09-09
+900006,Mia,Johnson,7,Carla Johnson,,505-555-0107,,,,English,2013-05-18
+900007,Lucas,Chavez,8,Rosa Chavez,rosa.chavez@example.com,505-555-0108,,,,Spanish,2012-12-01
+900008,Isabella,Kim,9,Daniel Kim,daniel.kim@example.com,505-555-0109,,,,English,2011-08-27
+900009,Mateo,Sanchez,10,Luz Sanchez,luz.sanchez@example.com,505-555-0110,,,,Spanish,2010-04-11
+900010,Zoe,Williams,12,Andre Williams,andre.williams@example.com,505-555-0111,,,,English,2008-10-05

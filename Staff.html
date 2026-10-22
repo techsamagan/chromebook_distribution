@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <?!= include_('Styles') ?>
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span id="school">Chromebook Program</span><small>Chromebook Program</small></div>
+    <div class="who" id="who"></div>
+  </header>
+  <nav class="menu" id="nav" aria-label="Menu"></nav>
+  <main id="main"><p class="muted">Loading</p></main>
+  <div id="printArea"></div>
+
+  <script>var BOOT = <?!= boot ?>;</script>
+  <?!= include_('ClientCore') ?>
+  <?!= include_('QrLib') ?>
+  <?!= include_('StaffCore') ?>
+  <?!= include_('StaffOps') ?>
+  <?!= include_('StaffAdmin') ?>
+  <script>
+    if (BOOT.boot) start(BOOT.boot);
+    else call('apiBoot').then(start).catch(function (e) {
+      clear($('main')).appendChild(el('div', { class: 'note bad', text: errText(e) }));
+    });
+  </script>
+</body>
+</html>
